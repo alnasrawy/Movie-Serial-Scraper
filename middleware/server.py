@@ -91,23 +91,76 @@ def _proxy_url(sid: str, media_url: str, name: str = "") -> str:
     return "/stream?" + urlencode({"sid": sid, "url": media_url})
 
 
-def _scrape_all(query: str, sites: list[str]) -> list[dict]:
-    """Scrape watch servers for a query from the given site configs."""
+def _scrape_site(name: str, query: str) -> list[dict]:
+    """Scrape watch servers for a query from a single site config."""
     from scraper.fetcher import FetchSettings
     from scraper.sites import build_scraper, find_config
 
+    config = find_config(name)
+    if config is None:
+        log.warning("Unknown site %r skipped", name)
+        return []
+    config.custom["resolve_servers"] = False
+    config.custom["verify_servers"] = False
+    config.custom["label_servers"] = True
+    delay = float(os.environ.get("SCRAPE_DELAY", "0.25"))
+    scraper = build_scraper(config, FetchSettings(delay=delay, timeout=20))
+    try:
+        return scraper.scrape(query, with_details=True, watch_only=True)
+    except Exception as exc:
+        log.warning("Scrape failed on %s: %s", name, exc)
+        return []
+
+
+def _scrape_all(query: str, sites: list[str]) -> list[dict]:
+    """Scrape watch servers for a query from all sites, in parallel."""
+    import concurrent.futures
+
     items: list[dict] = []
-    for name in sites:
-        config = find_config(name)
-        if config is None:
-            log.warning("Unknown site %r skipped", name)
-            continue
-        config.custom["resolve_servers"] = False
-        config.custom["verify_servers"] = False
-        config.custom["label_servers"] = True
-        scraper = build_scraper(config, FetchSettings(delay=0.4, timeout=20))
-        items.extend(scraper.scrape(query, with_details=True, watch_only=True))
+    with concurrent.futures.ThreadPoolExecutor(max_workers=max(1, len(sites))) as pool:
+        futures = [pool.submit(_scrape_site, name, query) for name in sites]
+        for fut in concurrent.futures.as_completed(futures):
+            items.extend(fut.result())
     return items
+
+
+async def _resolve_many(servers: list[tuple[dict, dict]], limit: int = 6) -> list[tuple[dict, dict, dict]]:
+    """Resolve embed URLs concurrently, with a concurrency cap."""
+    sem = asyncio.Semaphore(limit)
+
+    async def one(item: dict, sv: dict) -> tuple[dict, dict, dict]:
+        async with sem:
+            res = await _resolve_embed(sv.get("url") or "", referer=item.get("detail_url"))
+            return item, sv, res
+
+    return await asyncio.gather(*(one(item, sv) for item, sv in servers))
+
+
+# Per-title result cache: key -> (expires_ts, resolved servers list)
+_watch_cache: dict[tuple, tuple[float, list[dict]]] = {}
+_WATCH_CACHE_TTL = float(os.environ.get("WATCH_CACHE_TTL", "600"))
+_MAX_CACHE_ENTRIES = 200
+
+
+def _cache_get(key: tuple) -> list[dict] | None:
+    import time
+
+    entry = _watch_cache.get(key)
+    if entry is None:
+        return None
+    expires, servers = entry
+    if time.monotonic() > expires:
+        _watch_cache.pop(key, None)
+        return None
+    return servers
+
+
+def _cache_set(key: tuple, servers: list[dict]) -> None:
+    import time
+
+    if len(_watch_cache) >= _MAX_CACHE_ENTRIES:
+        _watch_cache.clear()
+    _watch_cache[key] = (time.monotonic() + _WATCH_CACHE_TTL, servers)
 
 
 async def _resolve_embed(url: str, referer: str | None) -> dict:
@@ -245,6 +298,17 @@ async def watch(req: WatchRequest, request: Request) -> dict:
     # Some sites index a title under its Arabic name, others under the original
     # (akwams ignores "استهلال" but matches "Inception"). Try every candidate
     # and merge unique items so we keep max server coverage.
+    cache_key = (str(request.base_url).rstrip("/"), tuple(candidates), tuple(sites))
+    cached = _cache_get(cache_key)
+    if cached is not None:
+        return {
+            "tmdb_id": req.tmdb_id,
+            "type": req.type,
+            "query": query,
+            "cached": True,
+            "servers": cached,
+        }
+
     merged_items: list[dict] = []
     seen: set[tuple] = set()
     for cand in candidates:
@@ -257,22 +321,25 @@ async def watch(req: WatchRequest, request: Request) -> dict:
     items = merged_items
     base = str(request.base_url).rstrip("/")
 
-    servers: list[dict] = []
+    to_resolve = []
     for item in items:
         for sv in item.get("watch_servers") or []:
-            url = sv.get("url")
-            if not url:
-                continue
-            res = await _resolve_embed(url, referer=item.get("detail_url"))
-            if res.get("kind") == "none":
-                continue
-            servers.append({
-                "site": item.get("source"),
-                "name": sv.get("name"),
-                "original_name": sv.get("original_name"),
-                "kind": res["kind"],
-                "proxy_url": base + _proxy_url(res["sid"], res["url"]),
-            })
+            if sv.get("url"):
+                to_resolve.append((item, sv))
+
+    servers: list[dict] = []
+    for item, sv, res in await _resolve_many(to_resolve):
+        if res.get("kind") == "none":
+            continue
+        servers.append({
+            "site": item.get("source"),
+            "name": sv.get("name"),
+            "original_name": sv.get("original_name"),
+            "kind": res["kind"],
+            "proxy_url": base + _proxy_url(res["sid"], res["url"]),
+        })
+
+    _cache_set(cache_key, servers)
 
     return {
         "tmdb_id": req.tmdb_id,
@@ -366,4 +433,8 @@ async def close_session(sid: str) -> dict:
 async def health() -> dict:
     mgr = get_manager()
     n_browser = len(mgr.sessions) if mgr is not None else 0
-    return {"ok": True, "sessions": n_browser + len(http_sessions)}
+    return {
+        "ok": True,
+        "sessions": n_browser + len(http_sessions),
+        "cache_entries": len(_watch_cache),
+    }

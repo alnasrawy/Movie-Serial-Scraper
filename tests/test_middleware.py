@@ -232,6 +232,42 @@ def test_watch_requires_query_or_tmdb_id(monkeypatch):
     assert r.status_code == 400
 
 
+def test_watch_second_call_served_from_cache(monkeypatch):
+    """Repeat /watch for the same title must not scrape or resolve again."""
+    from fastapi.testclient import TestClient
+
+    from middleware import server
+
+    server._watch_cache.clear()
+
+    async def fake_resolve_embed(url, referer=None):
+        return {"sid": f"sid-{hash(url)}", "kind": "hls", "url": "https://cdn.test/master.m3u8"}
+
+    calls = {"scrape": 0}
+
+    def fake_scrape_all(query, sites):
+        calls["scrape"] += 1
+        return [{
+            "source": "akwams",
+            "title": "X",
+            "detail_url": "https://akwams.org/x",
+            "watch_servers": [{"name": "سيرفر 1", "url": "https://embed1.test/e/1"}],
+        }]
+
+    monkeypatch.setattr(server, "_scrape_all", fake_scrape_all)
+    monkeypatch.setattr(server, "_resolve_embed", fake_resolve_embed)
+
+    c = TestClient(server.app)
+    r1 = c.post("/watch", json={"query": "inception", "sites": ["akwams"]})
+    r2 = c.post("/watch", json={"query": "inception", "sites": ["akwams"]})
+    assert r1.status_code == 200
+    assert r2.status_code == 200
+    assert r2.json().get("cached") is True
+    assert r1.json()["servers"] == r2.json()["servers"]
+    assert calls["scrape"] == 1
+    server._watch_cache.clear()
+
+
 def test_watch_tries_multiple_query_candidates_and_merges(monkeypatch):
     """akwams ignores the Arabic title; watch must fall back to the original."""
     from fastapi.testclient import TestClient
