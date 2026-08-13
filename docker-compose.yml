@@ -1,0 +1,16 @@
+services:
+  api:
+    build: .
+    container_name: movie-serial-scraper
+    restart: unless-stopped
+    ports:
+      - "8000:8000"
+    environment:
+      MIDDLEWARE_HOST: 0.0.0.0
+      MIDDLEWARE_PORT: "8000"
+      TMDB_API_KEY: ${TMDB_API_KEY:-}
+    volumes:
+      # site settings live on the host so the app's config edits persist
+      - ./configs:/app/configs
+    # optional: cap memory so the headless browser cannot OOM the server
+    #mem_limit: 2g

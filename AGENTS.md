@@ -44,8 +44,11 @@ middleware/
   player.py         -> BrowserManager: long-lived Chromium, per-embed sessions,
                        ctx.request fetch (shares cookies, avoids headless TLS headers),
                        fetch() replays the embed Referer, refresh_session() mints new tokens
-  server.py         -> FastAPI app: POST /resolve, GET /stream (rewrites m3u8,
+  server.py         -> FastAPI app: POST /watch (TMDB id -> ready server list, the
+                       main-app contract), POST /resolve, GET /stream (rewrites m3u8,
                        strips PNG-wrapped TS, auto-refresh on 401/403), /health
+Dockerfile, docker-compose.yml, .env.example, DEPLOYMENT.md
+  -> run the backend on a VPS 24/7; the app calls http://IP:8000/watch
 cli.py              -> argparse CLI wrapping the scraper
 final_links.py      -> one command: scrape(watch_only) -> open each embed -> keep a
                        uvicorn proxy alive -> print final http://127.0.0.1:<port>/stream? URLs

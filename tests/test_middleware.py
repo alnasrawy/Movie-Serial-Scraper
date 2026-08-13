@@ -147,3 +147,52 @@ def test_stream_strips_png_wrapper(client):
 def test_stream_missing_session_returns_503(client):
     r = client.get("/stream", params={"sid": "nope", "url": "https://cdn.test/p/master.m3u8"})
     assert r.status_code == 503
+
+
+def test_watch_endpoint_returns_server_list(monkeypatch):
+    from fastapi.testclient import TestClient
+
+    from middleware import server
+
+    async def fake_open_session(url, referer=None, *, timeout=40.0):
+        return {"sid": f"sid-{hash(url)}", "kind": "hls", "url": "https://cdn.test/master.m3u8"}
+
+    async def fake_fetch(sid, url):
+        return 200, "application/vnd.apple.mpegurl", b"#EXTM3U\nseg.ts\n"
+
+    def fake_scrape_all(query, sites):
+        return [{
+            "source": "akwams",
+            "title": "X",
+            "detail_url": "https://akwams.org/x",
+            "watch_servers": [
+                {"name": "سيرفر 1", "url": "https://embed1.test/e/1"},
+                {"name": "سيرفر 2", "url": "https://embed2.test/e/2"},
+            ],
+        }]
+
+    monkeypatch.setattr(server, "_scrape_all", fake_scrape_all)
+    monkeypatch.setattr(server.manager, "open_session", fake_open_session)
+    monkeypatch.setattr(server.manager, "fetch", fake_fetch)
+
+    c = TestClient(server.app)
+    r = c.post("/watch", json={"query": "inception", "sites": ["akwams"]})
+    assert r.status_code == 200
+    data = r.json()
+    assert data["query"] == "inception"
+    assert len(data["servers"]) == 2
+    first = data["servers"][0]
+    assert first["name"] == "سيرفر 1"
+    assert first["site"] == "akwams"
+    assert first["kind"] == "hls"
+    assert first["proxy_url"].startswith("http://testserver/stream?sid=")
+
+
+def test_watch_requires_query_or_tmdb_id(monkeypatch):
+    from fastapi.testclient import TestClient
+
+    from middleware import server
+
+    c = TestClient(server.app)
+    r = c.post("/watch", json={})
+    assert r.status_code == 400

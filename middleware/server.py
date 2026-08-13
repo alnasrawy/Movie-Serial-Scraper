@@ -12,13 +12,15 @@ Run:  python -m uvicorn middleware.server:app --host 0.0.0.0 --port 8000
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import re
 import uuid
+from typing import Literal
 from urllib.parse import urljoin, urlencode
 
-from fastapi import FastAPI, Query, Request
+from fastapi import FastAPI, HTTPException, Query, Request
 from fastapi.responses import Response, StreamingResponse
 from pydantic import BaseModel
 
@@ -34,8 +36,37 @@ class ResolveRequest(BaseModel):
     referer: str | None = None
 
 
+class WatchRequest(BaseModel):
+    """The main-app contract: give us a TMDB id (or a raw query) and we return
+    a ready-to-play server list."""
+
+    tmdb_id: int | None = None
+    type: Literal["movie", "tv"] = "movie"
+    query: str | None = None
+    sites: list[str] | None = None
+
+
 def _proxy_url(sid: str, media_url: str, name: str = "") -> str:
     return "/stream?" + urlencode({"sid": sid, "url": media_url})
+
+
+def _scrape_all(query: str, sites: list[str]) -> list[dict]:
+    """Scrape watch servers for a query from the given site configs."""
+    from scraper.fetcher import FetchSettings
+    from scraper.sites import build_scraper, find_config
+
+    items: list[dict] = []
+    for name in sites:
+        config = find_config(name)
+        if config is None:
+            log.warning("Unknown site %r skipped", name)
+            continue
+        config.custom["resolve_servers"] = False
+        config.custom["verify_servers"] = False
+        config.custom["label_servers"] = True
+        scraper = build_scraper(config, FetchSettings(delay=0.4, timeout=20))
+        items.extend(scraper.scrape(query, with_details=True, watch_only=True))
+    return items
 
 
 def _strip_png_wrapper(data: bytes) -> bytes:
@@ -90,6 +121,62 @@ async def resolve(req: ResolveRequest, request: Request) -> dict:
     else:
         result["proxy_url"] = None
     return result
+
+
+@app.post("/watch")
+async def watch(req: WatchRequest, request: Request) -> dict:
+    """Main-app contract: TMDB id (or raw query) -> list of playable servers.
+
+    Body: {"tmdb_id": 27205, "type": "movie", "sites": ["akwams", "egydead"]}
+    Returns: {"tmdb_id", "type", "query", "servers": [{name, site, kind, proxy_url}]}
+    """
+    sites = [s.strip() for s in (req.sites or ["akwams", "egydead"]) if s.strip()]
+    if not sites:
+        raise HTTPException(400, "No sites selected")
+
+    if req.query:
+        query = req.query
+        info = {"title": query}
+    else:
+        if not req.tmdb_id:
+            raise HTTPException(400, "Provide 'tmdb_id' or 'query'")
+        from scraper.tmdb import api_key, search_query, tmdb_title
+
+        key = api_key()
+        if not key:
+            raise HTTPException(400, "TMDB_API_KEY is not set on the server")
+        info = await asyncio.to_thread(tmdb_title, req.tmdb_id, key=key, media_type=req.type)
+        query = search_query(info)
+
+    items = await asyncio.to_thread(_scrape_all, query, sites)
+    base = str(request.base_url).rstrip("/")
+
+    servers: list[dict] = []
+    for item in items:
+        for sv in item.get("watch_servers") or []:
+            url = sv.get("url")
+            if not url:
+                continue
+            res = await manager.open_session(url, referer=item.get("detail_url"))
+            if res.get("kind") == "none":
+                continue
+            got = await manager.fetch(res["sid"], res["url"])
+            if not got or got[0] >= 400:
+                continue
+            servers.append({
+                "site": item.get("source"),
+                "name": sv.get("name"),
+                "original_name": sv.get("original_name"),
+                "kind": res["kind"],
+                "proxy_url": base + _proxy_url(res["sid"], res["url"]),
+            })
+
+    return {
+        "tmdb_id": req.tmdb_id,
+        "type": req.type,
+        "query": query,
+        "servers": servers,
+    }
 
 
 @app.get("/stream")
