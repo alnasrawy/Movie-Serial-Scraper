@@ -4,8 +4,14 @@ Endpoints:
     POST /resolve  {"url": embed, "referer": optional}
                    -> {"sid", "kind", "url", "proxy_url", ...}
     GET  /stream   {sid, url} -> HLS playlist (rewritten) or media bytes,
-                   transparently proxied through the embed's browser session.
+                   transparently proxied through the embed's session.
     GET  /health
+
+Two resolution paths:
+  * HTTP-only (default on low-memory hosts / free tier): resolves EarnVids
+    family embeds via plain HTTP (unpacked packer + Referer), no browser.
+  * Browser fallback (when BROWSER_ENABLED=1 and Playwright is installed):
+    opens a real Chromium session for hosts that need JS (vibuxer/hgcloud).
 
 Run:  python -m uvicorn middleware.server:app --host 0.0.0.0 --port 8000
 """
@@ -15,6 +21,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import os
 import re
 import uuid
 from typing import Literal
@@ -24,11 +31,37 @@ from fastapi import FastAPI, HTTPException, Query, Request
 from fastapi.responses import Response, StreamingResponse
 from pydantic import BaseModel
 
-from .player import BrowserManager
+from .http_resolver import resolve_http
 
 log = logging.getLogger(__name__)
 app = FastAPI(title="Embed resolver middleware")
-manager = BrowserManager()
+
+BROWSER_ENABLED = os.environ.get("BROWSER_ENABLED", "1").lower() in ("1", "true", "yes", "on")
+
+_manager = None
+
+
+def get_manager():
+    """Lazily import/start the browser manager (None when disabled/unavailable)."""
+    global _manager
+    if not BROWSER_ENABLED:
+        return None
+    if _manager is None:
+        try:
+            from .player import BrowserManager
+        except Exception as exc:  # playwright not installed (lite image)
+            log.warning("Playwright unavailable (%s); browser path disabled", exc)
+            return None
+        _manager = BrowserManager()
+    return _manager
+
+
+# HTTP-resolved sessions: sid -> {"url": media url, "referer": embed page}
+http_sessions: dict[str, dict] = {}
+
+
+def _new_sid() -> str:
+    return uuid.uuid4().hex
 
 
 class ResolveRequest(BaseModel):
@@ -67,6 +100,27 @@ def _scrape_all(query: str, sites: list[str]) -> list[dict]:
         scraper = build_scraper(config, FetchSettings(delay=0.4, timeout=20))
         items.extend(scraper.scrape(query, with_details=True, watch_only=True))
     return items
+
+
+async def _resolve_embed(url: str, referer: str | None) -> dict:
+    """Resolve one embed, HTTP-first, browser as fallback.
+
+    Returns a dict like BrowserManager.open_session: {sid, kind, url, error}.
+    """
+    got = await asyncio.to_thread(resolve_http, url, referer)
+    if got:
+        sid = _new_sid()
+        http_sessions[sid] = {"url": got["url"], "referer": url}
+        return {"sid": sid, "kind": got["kind"], "url": got["url"], "error": None}
+
+    mgr = get_manager()
+    if mgr is not None:
+        res = await mgr.open_session(url, referer)
+        if res.get("kind") != "none":
+            verified = await mgr.fetch(res["sid"], res["url"])
+            if verified and verified[0] < 400:
+                return res
+    return {"kind": "none", "url": url, "error": "not resolvable (http or browser)"}
 
 
 def _strip_png_wrapper(data: bytes) -> bytes:
@@ -112,9 +166,34 @@ def _rewrite_m3u8(text: str, base_url: str, sid: str) -> str:
     return "\n".join(out_lines)
 
 
+def _http_fetch(sid: str, url: str) -> tuple[int, str, bytes] | None:
+    """Plain-requests fetch for HTTP-resolved sessions (no browser)."""
+    import requests
+
+    ep = http_sessions.get(sid)
+    if not ep:
+        return None
+    try:
+        resp = requests.get(
+            url,
+            headers={
+                "User-Agent": (
+                    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+                    "(KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36"
+                ),
+                "Referer": ep["referer"],
+            },
+            timeout=30,
+        )
+        return resp.status_code, resp.headers.get("content-type", ""), resp.content
+    except requests.RequestException as exc:
+        log.debug("http-proxy fetch failed for %s: %s", url, exc)
+        return None
+
+
 @app.post("/resolve")
 async def resolve(req: ResolveRequest, request: Request) -> dict:
-    result = await manager.open_session(req.url, req.referer)
+    result = await _resolve_embed(req.url, req.referer)
     if result.get("kind") != "none":
         base = str(request.base_url).rstrip("/")
         result["proxy_url"] = base + _proxy_url(result["sid"], result["url"])
@@ -157,11 +236,8 @@ async def watch(req: WatchRequest, request: Request) -> dict:
             url = sv.get("url")
             if not url:
                 continue
-            res = await manager.open_session(url, referer=item.get("detail_url"))
+            res = await _resolve_embed(url, referer=item.get("detail_url"))
             if res.get("kind") == "none":
-                continue
-            got = await manager.fetch(res["sid"], res["url"])
-            if not got or got[0] >= 400:
                 continue
             servers.append({
                 "site": item.get("source"),
@@ -182,8 +258,16 @@ async def watch(req: WatchRequest, request: Request) -> dict:
 @app.get("/stream")
 async def stream(sid: str = Query(...), url: str = Query(...)) -> Response:
     status, content_type, body = None, "", b""
-    if manager.sessions.get(sid) and manager.sessions[sid].active:
-        got = await manager.fetch(sid, url)
+    mgr = get_manager()
+    browser_session = mgr.sessions.get(sid) if mgr is not None else None
+    http_ep = http_sessions.get(sid)
+
+    if browser_session is not None and browser_session.active:
+        got = await mgr.fetch(sid, url)
+        if got:
+            status, content_type, body = got
+    elif http_ep:
+        got = await asyncio.to_thread(_http_fetch, sid, url)
         if got:
             status, content_type, body = got
 
@@ -193,11 +277,22 @@ async def stream(sid: str = Query(...), url: str = Query(...)) -> Response:
         and ("mpegurl" in content_type or "m3u8" in content_type or url.lower().endswith(".m3u8"))
     )
 
-    # token died: refresh the embed session and retry once for playlists
+    # token died: refresh the session and retry once for playlists
     if status is not None and status >= 400 and (url.lower().endswith((".m3u8", ".txt")) or "mpegurl" in content_type):
-        if await manager.refresh_session(sid):
-            new_url = getattr(manager.sessions.get(sid), "new_url", url)
-            got = await manager.fetch(sid, new_url)
+        new_url = url
+        refreshed = False
+        if browser_session is not None:
+            refreshed = await mgr.refresh_session(sid)
+            new_url = getattr(browser_session, "new_url", url)
+        elif http_ep:
+            # HTTP sessions: re-resolve the embed and mint a fresh URL
+            re_got = await asyncio.to_thread(resolve_http, http_ep["referer"], None)
+            if re_got:
+                http_ep["url"] = re_got["url"]
+                new_url = re_got["url"]
+                refreshed = True
+        if refreshed:
+            got = await mgr.fetch(sid, new_url) if browser_session is not None else await asyncio.to_thread(_http_fetch, sid, new_url)
             if got:
                 status, content_type, body = got
                 url = new_url
@@ -226,10 +321,15 @@ async def stream_video(sid: str = Query(...), url: str = Query(...)) -> Response
 
 @app.delete("/session/{sid}")
 async def close_session(sid: str) -> dict:
-    await manager.close_session(sid)
+    http_sessions.pop(sid, None)
+    mgr = get_manager()
+    if mgr is not None and sid in mgr.sessions:
+        await mgr.close_session(sid)
     return {"ok": True}
 
 
 @app.get("/health")
 async def health() -> dict:
-    return {"ok": True, "sessions": len(manager.sessions)}
+    mgr = get_manager()
+    n_browser = len(mgr.sessions) if mgr is not None else 0
+    return {"ok": True, "sessions": n_browser + len(http_sessions)}

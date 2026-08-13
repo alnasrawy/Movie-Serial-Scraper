@@ -115,8 +115,9 @@ def client(monkeypatch):
         ts_packet = b"\x47" + b"\x00" * 187
         return 200, "image/png", b"\x89PNG\r\n\x1a\n" + ts_packet * 3
 
-    monkeypatch.setitem(server.manager.sessions, "test-sid", session)
-    monkeypatch.setattr(server.manager, "fetch", fake_fetch)
+    mgr = server.get_manager()
+    monkeypatch.setitem(mgr.sessions, "test-sid", session)
+    monkeypatch.setattr(mgr, "fetch", fake_fetch)
     return TestClient(server.app)
 
 
@@ -154,11 +155,8 @@ def test_watch_endpoint_returns_server_list(monkeypatch):
 
     from middleware import server
 
-    async def fake_open_session(url, referer=None, *, timeout=40.0):
+    async def fake_resolve_embed(url, referer=None):
         return {"sid": f"sid-{hash(url)}", "kind": "hls", "url": "https://cdn.test/master.m3u8"}
-
-    async def fake_fetch(sid, url):
-        return 200, "application/vnd.apple.mpegurl", b"#EXTM3U\nseg.ts\n"
 
     def fake_scrape_all(query, sites):
         return [{
@@ -172,8 +170,7 @@ def test_watch_endpoint_returns_server_list(monkeypatch):
         }]
 
     monkeypatch.setattr(server, "_scrape_all", fake_scrape_all)
-    monkeypatch.setattr(server.manager, "open_session", fake_open_session)
-    monkeypatch.setattr(server.manager, "fetch", fake_fetch)
+    monkeypatch.setattr(server, "_resolve_embed", fake_resolve_embed)
 
     c = TestClient(server.app)
     r = c.post("/watch", json={"query": "inception", "sites": ["akwams"]})
@@ -186,6 +183,31 @@ def test_watch_endpoint_returns_server_list(monkeypatch):
     assert first["site"] == "akwams"
     assert first["kind"] == "hls"
     assert first["proxy_url"].startswith("http://testserver/stream?sid=")
+
+
+def test_stream_serves_http_session_without_browser(monkeypatch):
+    """A sid created by the HTTP resolver streams through the requests proxy."""
+    from fastapi.testclient import TestClient
+
+    from middleware import server
+
+    server.http_sessions["http-sid"] = {
+        "url": "https://cdn.test/p/master.m3u8",
+        "referer": "https://embed.test/e/1",
+    }
+
+    def fake_http_fetch(sid, url):
+        return 200, "application/vnd.apple.mpegurl", b"#EXTM3U\nseg-1.ts\nseg-2.ts\n"
+
+    monkeypatch.setattr(server, "_http_fetch", fake_http_fetch)
+    try:
+        c = TestClient(server.app)
+        r = c.get("/stream", params={"sid": "http-sid", "url": "https://cdn.test/p/master.m3u8"})
+        assert r.status_code == 200
+        assert "/stream?sid=http-sid&url=" in r.text
+        assert "seg-1.ts" in r.text
+    finally:
+        server.http_sessions.pop("http-sid", None)
 
 
 def test_watch_requires_query_or_tmdb_id(monkeypatch):

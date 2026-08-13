@@ -44,7 +44,10 @@ def unpack_packer(text: str) -> str | None:
             n = int(tok, radix)
         except ValueError:
             return tok
-        if 0 <= n < count:
+        # The original decoder skips empty table entries (`if(k[c])`); replacing
+        # with '' would corrupt literal text that happens to look like a token
+        # (e.g. base-36 'l'/'n' inside ",l,n,.urlset").
+        if 0 <= n < count and table[n]:
             return table[n]
         return tok
 

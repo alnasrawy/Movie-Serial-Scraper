@@ -299,6 +299,25 @@ def test_unpack_packer():
     assert "http://srv.cdn/path/hls.m3u8" in unpack_packer(PACKED)
 
 
+PACKED_URLSET = (
+    "eval(function(p,a,c,k,e,d){while(c--)if(k[c])p=p.replace("
+    "new RegExp('\\\\b'+c.toString(a)+'\\\\b','g'),k[c]);return p}("
+    "'0=\"1://2/3/x,l,n,.4/5.txt\";',36,25,"
+    "'var|https|host|path|urlset|master|||||||||||||||||||'.split('|')))"
+)
+
+
+def test_unpack_packer_keeps_literal_l_n_in_urlset():
+    """Base-36 letters `l`/`n` inside ",l,n,.urlset" are literal text; the
+    decoder must skip empty table entries (`if(k[c])`) instead of blanking
+    them out (regression: ",l,n," used to come back as ",,,")."""
+    from scraper.resolver import unpack_packer
+
+    out = unpack_packer(PACKED_URLSET)
+    assert "x,l,n,.urlset/master.txt" in out
+    assert ",,," not in out
+
+
 def test_resolve_embed_earnvids():
     from bs4 import BeautifulSoup
 

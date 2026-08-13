@@ -41,18 +41,22 @@ scraper/
   storage.py        -> JSON / CSV export
   tmdb.py           -> TMDB id -> Arabic search title (needs 32-char v3 API key)
 middleware/
+  http_resolver.py  -> PURE-HTTP resolver (no browser): GET embed -> unpack_packer
+                       -> .urlset/master.txt -> HLS with Referer. Cheap/fast path.
   player.py         -> BrowserManager: long-lived Chromium, per-embed sessions,
                        ctx.request fetch (shares cookies, avoids headless TLS headers),
                        fetch() replays the embed Referer, refresh_session() mints new tokens
   server.py         -> FastAPI app: POST /watch (TMDB id -> ready server list, the
                        main-app contract), POST /resolve, GET /stream (rewrites m3u8,
-                       strips PNG-wrapped TS, auto-refresh on 401/403), /health
-Dockerfile, docker-compose.yml, .env.example, DEPLOYMENT.md
-  -> run the backend on a VPS 24/7; the app calls http://IP:8000/watch
+                       strips PNG-wrapped TS, auto-refresh on 401/403), /health.
+                       Hybrid resolution: HTTP-first, browser only when BROWSER_ENABLED=1.
+Dockerfile, Dockerfile.lite, docker-compose.yml, render.yaml, .env.example, DEPLOYMENT.md
+  -> run the backend on a VPS 24/7; the app calls http://IP:8000/watch.
+     Dockerfile.lite = pure HTTP (free Render tier, ~100MB). Dockerfile = browser (VPS).
 cli.py              -> argparse CLI wrapping the scraper
 final_links.py      -> one command: scrape(watch_only) -> open each embed -> keep a
                        uvicorn proxy alive -> print final http://127.0.0.1:<port>/stream? URLs
-tests/              -> 38 tests. conftest.py sets PROJECT_ROOT on sys.path and starts
+tests/              -> 42 tests. conftest.py sets PROJECT_ROOT on sys.path and starts
                        a local mock site (tests/mock_site.py) — no internet required.
 ```
 
@@ -65,10 +69,20 @@ tests/              -> 38 tests. conftest.py sets PROJECT_ROOT on sys.path and s
   `BrowserManager.fetch` uses `ctx.request` (the APIRequestContext that shares
   the browser context's cookie jar but sends neutral TLS headers). Keep this.
 - `Browser.new_context()` has **no** `referer` kwarg — set it on `page.goto`.
-- EarnVids-family hosts (smoothpre/minochinos/morencius) use JWPlayer and fake
-  extensions (`master.txt`, `index-fX-vX-aX.txt`, `seg-*.woff2`) but serve
-  **standard HLS** (content-type `application/vnd.apple.mpegurl`). Their CDN
-  requires the embed page as `Referer` (404 otherwise) — `fetch()` replays it.
+- **EarnVids-family hosts (smoothpre) resolve with pure HTTP — no browser:**
+  the embed page's Dean Edwards packer holds the media URL *as static text*
+  (e.g. `..._ ,l,n,.urlset/master.txt`), and the CDN serves HLS to a plain
+  `requests` GET **with Referer = the embed page** (200, `application/vnd.apple.mpegurl`).
+  `middleware/http_resolver.resolve_http()` implements this; it is the default
+  path on the free tier. minochinos/morencius are a different page structure
+  (no packer) and currently resolve in neither mode.
+- **`unpack_packer` must skip empty table entries** (`if(k[c])` like the original
+  JS): base-36 letters `l`/`n` inside the literal `,l,n,.urlset` path are NOT
+  tokens. Replacing them with empty strings corrupted `,l,n,` into `,,,` (the
+  CDN then 404s). Regression-tested in tests/test_scraper.py.
+- vibuxer/hgcloud: token is minted by heavily obfuscated JS (obfuscator.io,
+  `main.js?v=1.1.9`) that even hangs a plain Node run; browser-only host. Do not
+  attempt static deobfuscation.
 - tiktokcdn wraps MPEG-TS segments in a **PNG container**. `_strip_png_wrapper`
   must find a TS sync run (0x47 at i, i+188, i+2*188) — the PNG signature itself
   contains a 0x47 ("G"), so a naive `find(b"\x47")` is WRONG (regression tested).
