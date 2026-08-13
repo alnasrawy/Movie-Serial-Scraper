@@ -28,13 +28,21 @@ from typing import Literal
 from urllib.parse import urljoin, urlencode
 
 from fastapi import FastAPI, HTTPException, Query, Request
-from fastapi.responses import Response, StreamingResponse
+from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import FileResponse, Response, StreamingResponse
 from pydantic import BaseModel
 
 from .http_resolver import resolve_http
 
 log = logging.getLogger(__name__)
 app = FastAPI(title="Embed resolver middleware")
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 
 BROWSER_ENABLED = os.environ.get("BROWSER_ENABLED", "1").lower() in ("1", "true", "yes", "on")
 
@@ -330,6 +338,13 @@ async def stream(sid: str = Query(...), url: str = Query(...)) -> Response:
     stripped = _strip_png_wrapper(body)
     media_type = "video/mp2t" if stripped is not body else (content_type or "application/octet-stream")
     return StreamingResponse(iter([stripped]), media_type=media_type)
+
+
+@app.get("/", include_in_schema=False)
+async def index() -> Response:
+    """The in-browser tester page (add a movie and see the live servers)."""
+    page = os.path.join(os.path.dirname(__file__), "static", "index.html")
+    return FileResponse(page, media_type="text/html")
 
 
 @app.get("/stream-video")

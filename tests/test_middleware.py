@@ -127,6 +127,18 @@ def test_health(client):
     assert r.json()["ok"] is True
 
 
+def test_index_page_served(client):
+    r = client.get("/")
+    assert r.status_code == 200
+    assert r.headers["content-type"].startswith("text/html")
+    assert "فاحص السيرفرات" in r.text
+
+
+def test_cors_headers(client):
+    r = client.get("/health", headers={"Origin": "https://example.com"})
+    assert r.headers.get("access-control-allow-origin") == "*"
+
+
 def test_stream_rewrites_playlist(client):
     r = client.get("/stream", params={"sid": "test-sid", "url": "https://cdn.test/p/master.m3u8"})
     assert r.status_code == 200
