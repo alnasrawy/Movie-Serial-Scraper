@@ -218,3 +218,46 @@ def test_watch_requires_query_or_tmdb_id(monkeypatch):
     c = TestClient(server.app)
     r = c.post("/watch", json={})
     assert r.status_code == 400
+
+
+def test_watch_tries_multiple_query_candidates_and_merges(monkeypatch):
+    """akwams ignores the Arabic title; watch must fall back to the original."""
+    from fastapi.testclient import TestClient
+
+    from middleware import server
+
+    def fake_tmdb_title(tmdb_id, key=None, media_type="movie"):
+        return {
+            "tmdb_id": str(tmdb_id),
+            "media_type": "movie",
+            "title": "استهلال",
+            "original_title": "Inception",
+            "overview": "",
+        }
+
+    def fake_scrape_all(query, sites):
+        if query == "استهلال":
+            return []
+        if query == "Inception":
+            return [{
+                "source": "akwams",
+                "title": "Inception",
+                "detail_url": "https://akwams.org/x",
+                "watch_servers": [{"name": "سيرفر 1", "url": "https://embed1.test/e/1"}],
+            }]
+        return []
+
+    async def fake_resolve_embed(url, referer=None):
+        return {"sid": f"sid-{hash(url)}", "kind": "hls", "url": "https://cdn.test/master.m3u8"}
+
+    monkeypatch.setenv("TMDB_API_KEY", "test-key")
+    monkeypatch.setattr("scraper.tmdb.tmdb_title", fake_tmdb_title)
+    monkeypatch.setattr(server, "_scrape_all", fake_scrape_all)
+    monkeypatch.setattr(server, "_resolve_embed", fake_resolve_embed)
+
+    c = TestClient(server.app)
+    r = c.post("/watch", json={"tmdb_id": 27205, "type": "movie"})
+    assert r.status_code == 200
+    data = r.json()
+    assert len(data["servers"]) == 1
+    assert data["servers"][0]["site"] == "akwams"

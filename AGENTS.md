@@ -83,6 +83,13 @@ tests/              -> 42 tests. conftest.py sets PROJECT_ROOT on sys.path and s
 - vibuxer/hgcloud: token is minted by heavily obfuscated JS (obfuscator.io,
   `main.js?v=1.1.9`) that even hangs a plain Node run; browser-only host. Do not
   attempt static deobfuscation.
+- **Site search is title-language-dependent**: akwams finds a film under its
+  original title ("Inception") but NOT the Arabic one ("استهلال"), while egydead
+  matches both. `POST /watch` therefore tries `[Arabic title, original title]`
+  as query candidates and merges unique items (dedupe by source+detail_url).
+- **morencius resolves via pure HTTP now too** (its signed `hls2/...master.m3u8`
+  sits in the embed HTML, no packer needed) — treat it as an EarnVids-family
+  host like smoothpre, not a dead one.
 - tiktokcdn wraps MPEG-TS segments in a **PNG container**. `_strip_png_wrapper`
   must find a TS sync run (0x47 at i, i+188, i+2*188) — the PNG signature itself
   contains a 0x47 ("G"), so a naive `find(b"\x47")` is WRONG (regression tested).

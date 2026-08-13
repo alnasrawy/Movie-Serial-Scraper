@@ -215,7 +215,7 @@ async def watch(req: WatchRequest, request: Request) -> dict:
 
     if req.query:
         query = req.query
-        info = {"title": query}
+        candidates = [query]
     else:
         if not req.tmdb_id:
             raise HTTPException(400, "Provide 'tmdb_id' or 'query'")
@@ -226,8 +226,27 @@ async def watch(req: WatchRequest, request: Request) -> dict:
             raise HTTPException(400, "TMDB_API_KEY is not set on the server")
         info = await asyncio.to_thread(tmdb_title, req.tmdb_id, key=key, media_type=req.type)
         query = search_query(info)
+        candidates = []
+        for t in (query, info.get("original_title") or ""):
+            t = (t or "").strip()
+            if t and t not in candidates:
+                candidates.append(t)
+        if not candidates:
+            candidates = [info.get("original_title") or info.get("title") or str(req.tmdb_id)]
 
-    items = await asyncio.to_thread(_scrape_all, query, sites)
+    # Some sites index a title under its Arabic name, others under the original
+    # (akwams ignores "استهلال" but matches "Inception"). Try every candidate
+    # and merge unique items so we keep max server coverage.
+    merged_items: list[dict] = []
+    seen: set[tuple] = set()
+    for cand in candidates:
+        for item in await asyncio.to_thread(_scrape_all, cand, sites):
+            key = (item.get("source"), item.get("detail_url") or item.get("id") or item.get("title"))
+            if key not in seen:
+                seen.add(key)
+                merged_items.append(item)
+
+    items = merged_items
     base = str(request.base_url).rstrip("/")
 
     servers: list[dict] = []

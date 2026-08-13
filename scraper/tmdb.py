@@ -38,6 +38,9 @@ def tmdb_title(
         timeout=timeout,
     )
     resp.raise_for_status()
+    # TMDB always sends UTF-8; force it so short Arabic titles don't get
+    # misdetected (chardet guesses "ascii"/"cp1252" and mangles them with '?').
+    resp.encoding = "utf-8"
     data = resp.json()
     title = data.get("title") or data.get("name") or data.get("original_title") or ""
     original = data.get("original_title") or data.get("original_name") or title
