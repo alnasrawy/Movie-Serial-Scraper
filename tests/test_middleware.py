@@ -232,6 +232,37 @@ def test_watch_requires_query_or_tmdb_id(monkeypatch):
     assert r.status_code == 400
 
 
+def test_direct_endpoint_returns_raw_media_urls(monkeypatch):
+    """POST /direct returns CDN URLs without proxy wrapping, with caching."""
+    from fastapi.testclient import TestClient
+
+    from middleware import server
+
+    server._direct_cache.clear()
+
+    def fake_direct_servers(req):
+        return "Inception", [{
+            "site": "akwams",
+            "name": "سيرفر 5",
+            "kind": "hls",
+            "url": "https://cdn.test/hls2/x/y/master.m3u8?t=abc",
+        }]
+
+    monkeypatch.setattr(server, "_direct_servers", fake_direct_servers)
+    c = TestClient(server.app)
+
+    r1 = c.post("/direct", json={"query": "Inception", "sites": ["akwams"]})
+    r2 = c.post("/direct", json={"query": "Inception", "sites": ["akwams"]})
+    assert r1.status_code == 200
+    data = r1.json()
+    assert data["query"] == "Inception"
+    assert len(data["servers"]) == 1
+    assert data["servers"][0]["url"].startswith("https://cdn.test/hls2")
+    assert "/stream?" not in data["servers"][0]["url"]
+    assert r2.json().get("cached") is True
+    server._direct_cache.clear()
+
+
 def test_watch_second_call_served_from_cache(monkeypatch):
     """Repeat /watch for the same title must not scrape or resolve again."""
     from fastapi.testclient import TestClient

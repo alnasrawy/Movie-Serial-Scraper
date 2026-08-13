@@ -47,16 +47,21 @@ middleware/
                        ctx.request fetch (shares cookies, avoids headless TLS headers),
                        fetch() replays the embed Referer, refresh_session() mints new tokens
   server.py         -> FastAPI app: POST /watch (TMDB id -> ready server list, the
-                       main-app contract), POST /resolve, GET /stream (rewrites m3u8,
-                       strips PNG-wrapped TS, auto-refresh on 401/403), /health.
+                       main-app contract), POST /direct (raw CDN m3u8 URLs, no
+                       proxy/session), POST /resolve, GET /stream (rewrites m3u8,
+                       strips PNG-wrapped TS, auto-refresh on 401/403), /health,
+                       GET / (in-browser tester page, middleware/static/index.html).
                        Hybrid resolution: HTTP-first, browser only when BROWSER_ENABLED=1.
 Dockerfile, Dockerfile.lite, docker-compose.yml, render.yaml, .env.example, DEPLOYMENT.md
   -> run the backend on a VPS 24/7; the app calls http://IP:8000/watch.
      Dockerfile.lite = pure HTTP (free Render tier, ~100MB). Dockerfile = browser (VPS).
 cli.py              -> argparse CLI wrapping the scraper
+direct_links.py     -> ONE command that prints DIRECT m3u8 media URLs (no proxy):
+                       scrape -> resolve_http -> verified CDN links playable straight
+                       in ExoPlayer/VLC (EarnVids hls2 tokens last ~36h, no Referer).
 final_links.py      -> one command: scrape(watch_only) -> open each embed -> keep a
                        uvicorn proxy alive -> print final http://127.0.0.1:<port>/stream? URLs
-tests/              -> 42 tests. conftest.py sets PROJECT_ROOT on sys.path and starts
+tests/              -> 47 tests. conftest.py sets PROJECT_ROOT on sys.path and starts
                        a local mock site (tests/mock_site.py) — no internet required.
 ```
 
@@ -105,7 +110,9 @@ tests/              -> 42 tests. conftest.py sets PROJECT_ROOT on sys.path and s
 - UI/UX text is **Arabic**. Server names use `سيرفر {n}` / `تحميل {n}`.
 - Keep `watch_only` a first-class option everywhere (the product wants watch
   links only, no download links).
-- `final_links.py` and `cli.py` must both keep working; they share `scraper/`.
+- `final_links.py`, `direct_links.py` and `cli.py` must all keep working; they
+  share `scraper/` and `middleware/` (final_links historically broke when
+  `manager` was renamed to `get_manager()` — prefer the module-level helpers).
 
 ## Roadmap (the mission for the next coding session)
 

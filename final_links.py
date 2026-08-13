@@ -34,7 +34,7 @@ import uvicorn
 
 from scraper.fetcher import FetchSettings
 from scraper.sites import available_sites, build_scraper, find_config
-from middleware.server import _proxy_url, app, manager
+from middleware import server
 
 
 def scrape_sites(query: str, sites: list[str]) -> list[dict]:
@@ -56,7 +56,7 @@ def scrape_sites(query: str, sites: list[str]) -> list[dict]:
 
 async def resolve_items(items: list[dict], port: int, timeout: float, max_servers: int) -> None:
     print(f"[2/3] Resolving {sum(1 for i in items for _ in i.get('watch_servers', []))} embed links "
-          f"in a headless browser (a few seconds each) ...", flush=True)
+          f"(pure HTTP first, browser fallback) ...", flush=True)
     for item in items:
         item["final_servers"] = []
         for sv in (item.get("watch_servers") or [])[:max_servers]:
@@ -64,17 +64,14 @@ async def resolve_items(items: list[dict], port: int, timeout: float, max_server
             if not url:
                 continue
             print(f"      {sv.get('name')}: {url}", flush=True)
-            res = await manager.open_session(url, referer=item.get("detail_url"), timeout=timeout)
+            res = await server._resolve_embed(url, referer=item.get("detail_url"))
             if res.get("kind") == "none":
-                continue
-            got = await manager.fetch(res["sid"], res["url"])
-            if not got or got[0] != 200:
                 continue
             item["final_servers"].append({
                 "name": sv.get("name"),
                 "original_name": sv.get("original_name"),
                 "kind": res["kind"],
-                "url": f"http://127.0.0.1:{port}" + _proxy_url(res["sid"], res["url"]),
+                "url": f"http://127.0.0.1:{port}" + server._proxy_url(res["sid"], res["url"]),
             })
 
 
@@ -109,7 +106,7 @@ async def main(args) -> int:
 
     print_report(items)
 
-    config = uvicorn.Config(app, host="0.0.0.0", port=args.port, log_level="warning")
+    config = uvicorn.Config(server.app, host="0.0.0.0", port=args.port, log_level="warning")
     server = uvicorn.Server(config)
     serve_task = asyncio.create_task(server.serve())
     while not server.started:

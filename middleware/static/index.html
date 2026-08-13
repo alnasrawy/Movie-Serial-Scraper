@@ -107,6 +107,12 @@ $("frm").addEventListener("submit", async (ev) => {
     const data = await r.json();
     if (!r.ok) throw new Error(data.detail || "فشل الطلب");
     render(data);
+    const dr = await fetch("/direct", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+    });
+    if (dr.ok) renderDirect(await dr.json());
   } catch (e) {
     setStatus("خطأ: " + e.message, true);
   } finally {
@@ -136,6 +142,29 @@ function render(data) {
     wrap.appendChild(el);
   }
   if (!data.servers.length) setStatus("لم يُعثر على سيرفرات قابلة للتشغيل لهذا العنوان.");
+}
+
+function renderDirect(data) {
+  const wrap = document.createElement("div");
+  wrap.className = "card";
+  wrap.innerHTML = `<h3 style="margin:0 0 10px">روابط مباشرة (m3u8) — تعمل في ExoPlayer / VLC مباشرة</h3>`;
+  if (!data.servers.length) {
+    wrap.innerHTML += `<div style="color:#9aa4b2">لم يُستخرج رابط مباشر لهذا العنوان.</div>`;
+  }
+  for (const s of data.servers) {
+    const el = document.createElement("div");
+    el.className = "server";
+    el.innerHTML = `
+      <span class="badge">${s.site} · ${s.kind}</span>
+      <div class="meta">
+        <div class="name">${s.name}</div>
+        <div class="url" dir="ltr">${s.url}</div>
+      </div>
+      <button class="btn btn-copy">نسخ</button>`;
+    el.querySelector(".btn-copy").onclick = () => navigator.clipboard.writeText(s.url).then(() => setStatus("تم نسخ الرابط المباشر"));
+    wrap.appendChild(el);
+  }
+  document.getElementById("results").appendChild(wrap);
 }
 
 function play(url) {

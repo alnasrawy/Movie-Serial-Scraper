@@ -23,6 +23,7 @@ import json
 import logging
 import os
 import re
+import time
 import uuid
 from typing import Literal
 from urllib.parse import urljoin, urlencode
@@ -143,8 +144,6 @@ _MAX_CACHE_ENTRIES = 200
 
 
 def _cache_get(key: tuple) -> list[dict] | None:
-    import time
-
     entry = _watch_cache.get(key)
     if entry is None:
         return None
@@ -156,8 +155,6 @@ def _cache_get(key: tuple) -> list[dict] | None:
 
 
 def _cache_set(key: tuple, servers: list[dict]) -> None:
-    import time
-
     if len(_watch_cache) >= _MAX_CACHE_ENTRIES:
         _watch_cache.clear()
     _watch_cache[key] = (time.monotonic() + _WATCH_CACHE_TTL, servers)
@@ -347,6 +344,90 @@ async def watch(req: WatchRequest, request: Request) -> dict:
         "query": query,
         "servers": servers,
     }
+
+
+# Same cache namespace pattern but for /direct (raw media URLs, no proxy).
+_direct_cache: dict[tuple, tuple[float, list[dict]]] = {}
+
+
+def _direct_servers(req: WatchRequest) -> tuple[str, list[dict]]:
+    """Scrape + resolve to raw media URLs; returns (query, [server dicts])."""
+    import concurrent.futures
+
+    if req.query:
+        query = req.query
+        candidates = [query]
+    else:
+        from scraper.tmdb import api_key, search_query, tmdb_title
+
+        key = api_key()
+        if not key:
+            raise HTTPException(400, "TMDB_API_KEY is not set on the server")
+        info = tmdb_title(req.tmdb_id, key=key, media_type=req.type)
+        query = search_query(info)
+        candidates = []
+        for t in (query, info.get("original_title") or ""):
+            t = (t or "").strip()
+            if t and t not in candidates:
+                candidates.append(t)
+        candidates = candidates or [info.get("original_title") or info.get("title") or str(req.tmdb_id)]
+
+    items: list[dict] = []
+    seen: set[tuple] = set()
+    for cand in candidates:
+        for item in _scrape_all(cand, req.sites or ["akwams", "egydead"]):
+            key = (item.get("source"), item.get("detail_url") or item.get("id") or item.get("title"))
+            if key not in seen:
+                seen.add(key)
+                items.append(item)
+
+    jobs = [(item, sv) for item in items for sv in (item.get("watch_servers") or []) if sv.get("url")]
+
+    servers: list[dict] = []
+    with concurrent.futures.ThreadPoolExecutor(max_workers=6) as pool:
+        futures = {
+            pool.submit(resolve_http, sv.get("url"), item.get("detail_url")): (item, sv)
+            for item, sv in jobs
+        }
+        for fut in concurrent.futures.as_completed(futures):
+            item, sv = futures[fut]
+            got = fut.result()
+            if not got:
+                continue
+            servers.append({
+                "site": item.get("source"),
+                "name": sv.get("name"),
+                "kind": got["kind"],
+                "url": got["url"],
+            })
+    return query, servers
+
+
+@app.post("/direct")
+async def direct(req: WatchRequest) -> dict:
+    """Like /watch but returns the raw m3u8/media URLs — no proxy, no session.
+
+    Body: {"tmdb_id": 27205, "type": "movie"} or {"query": "Inception"}
+    Returns: {"tmdb_id", "type", "query", "servers": [{site, name, kind, url}]}
+    The URLs are playable directly in ExoPlayer/VLC (EarnVids hls2 links are
+    token-signed for ~36h and do not need a Referer header).
+    """
+    sites = tuple(s.strip() for s in (req.sites or ["akwams", "egydead"]) if s.strip())
+    if not sites:
+        raise HTTPException(400, "No sites selected")
+    req.sites = list(sites)
+
+    cache_key = (req.query, req.tmdb_id, req.type, sites)
+    entry = _direct_cache.get(cache_key)
+    if entry is not None:
+        expires, servers = entry
+        if time.monotonic() <= expires:
+            return {"tmdb_id": req.tmdb_id, "type": req.type, "query": req.query, "cached": True, "servers": servers}
+        _direct_cache.pop(cache_key, None)
+
+    query, servers = _direct_servers(req)
+    _direct_cache[cache_key] = (time.monotonic() + _WATCH_CACHE_TTL, servers)
+    return {"tmdb_id": req.tmdb_id, "type": req.type, "query": query, "servers": servers}
 
 
 @app.get("/stream")
