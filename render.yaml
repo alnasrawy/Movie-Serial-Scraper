@@ -1,0 +1,14 @@
+# Render.com blueprint — connect this repo on Render and it deploys automatically.
+# One-click deploy: dashboard.render.com -> New + -> Blueprint -> select this repo.
+services:
+  - type: web
+    name: movie-serial-scraper
+    runtime: docker
+    plan: free
+    dockerfilePath: ./Dockerfile
+    healthCheckPath: /health
+    envVars:
+      - key: TMDB_API_KEY
+        sync: false   # you set this in the Render dashboard (never in the repo)
+      - key: MIDDLEWARE_HOST
+        value: 0.0.0.0

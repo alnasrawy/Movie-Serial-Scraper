@@ -1,10 +1,34 @@
-# نشر المشروع على الإنترنت (VPS)
+# نشر المشروع على الإنترنت
 
 هذا الدليل يشرح كيفية رفع **Movie-Serial-Scraper** ليعمل كخادم دائم على
 الإنترنت، بحيث يستدعيه تطبيق Alnasrawy TV عبر `POST /watch`.
 
-> **مهم:** GitHub لا يشغّل الكود. الخادم هو جهاز (VPS) يشغّل `uvicorn` عبر
-> Docker ويستقبل الطلبات 24/7.
+> **مهم:** GitHub لا يشغّل الكود. الخادم هو جهاز (VPS) أو خدمة PaaS (Render)
+> يشغّل `uvicorn` عبر Docker ويستقبل الطلبات 24/7.
+
+---
+
+## 0) تجربة سريعة على Render (مجاني)
+
+1. سجّل على https://dashboard.render.com (الدخول بحساب GitHub).
+2. من `New +` اختر **Blueprint**.
+3. اختر مستودع `Movie-Serial-Scraper` (سيجد `render.yaml` تلقائيًا).
+4. ستظهر خدمة `movie-serial-scraper` — افتحها وضع **TMDB_API_KEY** من تبويب
+   **Environment** (ثم Save Changes).
+5. اضغط **Apply** ثم انتظر البناء (5–10 دقائق أول مرة).
+6. عند اكتماله ستحصل على رابط مثل:
+   ```
+   https://movie-serial-scraper.onrender.com
+   ```
+7. جرّب من جهازك:
+   ```
+   https://movie-serial-scraper.onrender.com/health
+   ```
+8. وضع الرابط كعنوان الخادم في تطبيق Alnasrawy TV.
+
+> **تنبيهات التجربة المجانية:** الخدمة تنام بعد ~15 دقيقة خمول (أول استدعاء
+> بعده يستغرق ~دقيقة) ومع الحزمة المجانية الذاكرة 512MB قد يحدث ضيق مع
+> Chromium — إن رأيت `OOM` رقِّ للخطة المدفوعة (Starter ~$7) أو استخدم VPS.
 
 ---
 
