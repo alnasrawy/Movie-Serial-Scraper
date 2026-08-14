@@ -289,16 +289,42 @@ def _http_headers(ep: dict, url: str) -> dict:
 
 
 def _http_fetch(sid: str, url: str) -> tuple[int, str, bytes] | None:
-    """Plain-requests fetch for HTTP-resolved sessions (no browser)."""
-    import requests
+    """Fetch for HTTP-resolved sessions (no browser).
+
+    Prefers curl_cffi with a Chrome TLS fingerprint — the video CDNs bot-block
+    plain ``requests`` fingerprints (they return 502/429) but serve the same
+    URL fine to an impersonated browser client.
+    """
+    import requests as _plain
+
+    try:
+        from curl_cffi import requests as _imp
+    except Exception:
+        _imp = None
 
     ep = http_sessions.get(sid)
     if not ep:
         return None
+    headers = {
+        "User-Agent": ep.get("user_agent")
+        or "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+        "(KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36",
+        "Referer": ep["referer"],
+        "Accept": "*/*",
+    }
+    cookie = ep.get("cookie")
+    if cookie:
+        headers["Cookie"] = cookie
     try:
-        resp = requests.get(url, headers=_http_headers(ep, url), timeout=30)
+        if _imp is not None:
+            resp = _imp.get(url, impersonate="chrome131", headers=headers, timeout=30)
+            return resp.status_code, resp.headers.get("content-type", ""), resp.content
+    except Exception as exc:
+        log.debug("http-proxy impersonated fetch failed for %s: %s", url, exc)
+    try:
+        resp = _plain.get(url, headers=headers, timeout=30)
         return resp.status_code, resp.headers.get("content-type", ""), resp.content
-    except requests.RequestException as exc:
+    except _plain.RequestException as exc:
         log.debug("http-proxy fetch failed for %s: %s", url, exc)
         return None
 
