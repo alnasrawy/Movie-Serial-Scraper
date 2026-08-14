@@ -106,6 +106,15 @@ def _ext_for(kind: str) -> str:
     return ".mp4"
 
 
+def _path_lower(url: str) -> str:
+    """Lowercased URL path (ignoring query/fragment) — CDN media URLs carry
+    signed tokens as query params, so `url.lower().endswith(".m3u8")` fails on
+    `master.m3u8?t=...&s=...`. Media-type decisions must use the path only."""
+    from urllib.parse import urlparse
+
+    return urlparse(url).path.lower()
+
+
 def _proxy_url(sid: str, media_url: str, name: str = "", ref: str = "", site_ref: str = "", ext: str = "") -> str:
     q = {"url": media_url}
     if ref:
@@ -127,10 +136,15 @@ def _scrape_site(name: str, query: str) -> list[dict]:
     config.custom["resolve_servers"] = False
     config.custom["verify_servers"] = False
     config.custom["label_servers"] = True
-    delay = float(os.environ.get("SCRAPE_DELAY", "0.25"))
-    scraper = build_scraper(config, FetchSettings(delay=delay, timeout=20))
+    delay = float(os.environ.get("SCRAPE_DELAY", "0.1"))
+    max_items = int(os.environ.get("MAX_ITEMS_PER_SITE", "3"))
+    # A title search matches its first few cards; fetching details for every
+    # card costs 2-3 page requests each and is the #1 /watch latency driver.
+    # Retries are trimmed too — the /watch path has multiple sites and can
+    # afford a quick failure over a 2s/4s backoff.
+    scraper = build_scraper(config, FetchSettings(delay=delay, timeout=15, retries=1))
     try:
-        return scraper.scrape(query, with_details=True, watch_only=True)
+        return scraper.scrape(query, with_details=True, watch_only=True, max_items=max_items)
     except Exception as exc:
         log.warning("Scrape failed on %s: %s", name, exc)
         return []
@@ -148,13 +162,16 @@ def _scrape_all(query: str, sites: list[str]) -> list[dict]:
     return items
 
 
-async def _resolve_many(servers: list[tuple[dict, dict]], limit: int = 6) -> list[tuple[dict, dict, dict]]:
+async def _resolve_many(servers: list[tuple[dict, dict]], limit: int = 8) -> list[tuple[dict, dict, dict]]:
     """Resolve embed URLs concurrently, with a concurrency cap."""
     sem = asyncio.Semaphore(limit)
 
     async def one(item: dict, sv: dict) -> tuple[dict, dict, dict]:
         async with sem:
-            res = await _resolve_embed(sv.get("url") or "", referer=item.get("detail_url"))
+            res = await asyncio.wait_for(
+                _resolve_embed(sv.get("url") or "", referer=item.get("detail_url")),
+                timeout=35,
+            )
             return item, sv, res
 
     return await asyncio.gather(*(one(item, sv) for item, sv in servers))
@@ -463,8 +480,13 @@ async def watch(req: WatchRequest, request: Request) -> dict:
     merged_items: list[dict] = []
     seen: set[tuple] = set()
     if sites:
-        for cand in candidates:
-            for item in await asyncio.to_thread(_scrape_all, cand, sites):
+        # Run every query candidate in parallel (each internally fan-outs across
+        # sites) so the Arabic title + original title don't add up serially.
+        cand_results = await asyncio.gather(
+            *(asyncio.to_thread(_scrape_all, cand, sites) for cand in candidates)
+        )
+        for items in cand_results:
+            for item in items:
                 key = (item.get("source"), item.get("detail_url") or item.get("id") or item.get("title"))
                 if key not in seen:
                     seen.add(key)
@@ -473,11 +495,18 @@ async def watch(req: WatchRequest, request: Request) -> dict:
     items = merged_items
     base = str(request.base_url).rstrip("/")
 
+    # Resolve each unique embed once (both candidates can match the same item).
     to_resolve = []
+    seen_embed: set[tuple] = set()
     for item in items:
         for sv in item.get("watch_servers") or []:
-            if sv.get("url"):
-                to_resolve.append((item, sv))
+            if not sv.get("url"):
+                continue
+            key = (sv["url"], item.get("detail_url") or "")
+            if key in seen_embed:
+                continue
+            seen_embed.add(key)
+            to_resolve.append((item, sv))
 
     servers: list[dict] = []
     for item, sv, res in await _resolve_many(to_resolve):
@@ -560,107 +589,125 @@ async def _refresh_primetv(http_ep: dict) -> tuple[str, bool]:
 async def _add_foreign_servers(req: WatchRequest, base: str, servers: list[dict]) -> tuple[str, list[dict]]:
     """Resolve foreign (vidsrc/primetv) streams for a TMDB id and append proxied servers.
 
+    The two providers are independent and run in parallel (each does up to a
+    few seconds of HTTP); the subtitle language list is fetched once afterwards.
+
     Returns (imdb_id, subtitle languages) — the former is needed by the app to
     fetch subtitles later via /subtitle.
     """
     if not req.tmdb_id:
         return "", []
     from scraper.tmdb import api_key, tmdb_title
+    from . import primetv
     from . import subtitles as subs
     from . import vidsrc
 
-    imdb_id, sub_langs = "", []
-    try:
-        if vidsrc.is_enabled():
-            res = await asyncio.to_thread(
-                vidsrc.resolve, req.tmdb_id, req.type, season=req.season, episode=req.episode
-            )
-            label = vidsrc._cfg().get("label", "سيرفر أجنبي")
-            for i, sv in enumerate(res.servers, 1):
-                sid = _new_sid()
-                http_sessions[sid] = {
-                    "url": sv["url"],
-                    "referer": vidsrc._cfg().get("player_referer", "https://cloudorchestranova.com/"),
-                    "kind": "vidsrc",
-                    "base_url": sv["base"],
-                    "host": sv["host"],
-                    "created": time.monotonic(),
-                }
-                servers.append({
-                    "site": "vidsrc",
-                    "name": "{} {}".format(label, i),
-                    "kind": "hls",
-                    "proxy_url": base + _proxy_url(sid, sv["url"], ext=_ext_for("hls")),
-                    "foreign": True,
-                })
-            imdb_id = res.imdb_id
-            if imdb_id and subs.is_enabled():
-                found = await asyncio.to_thread(subs.search, imdb_id)
-                sub_langs = subs.available_languages(found)
-    except Exception as exc:
-        log.warning("vidsrc/subtitle providers failed (%s); other servers unaffected", exc)
-
-    if not imdb_id and subs.is_enabled():
-        try:
-            imdb_id = await asyncio.to_thread(_tmdb_external_imdb, req.tmdb_id, req.type)
-            if imdb_id:
-                found = await asyncio.to_thread(subs.search, imdb_id)
-                sub_langs = subs.available_languages(found)
-        except Exception as exc:
-            log.warning("tmdb external_ids for subtitles failed: %s", exc)
-
-    try:
-        from . import primetv
-
-        if primetv.is_enabled():
-            key = api_key()
-            info = {}
-            if key:
-                try:
-                    info = await asyncio.to_thread(tmdb_title, req.tmdb_id, key=key, media_type=req.type)
-                except Exception as exc:
-                    log.warning("tmdb_title for primetv failed: %s", exc)
-            ptitle = (info.get("original_title") or info.get("title") or "").strip()
-            res = await asyncio.to_thread(
-                primetv.resolve,
-                req.tmdb_id,
-                req.type,
-                title=ptitle,
-                year=info.get("year"),
-                season=req.season,
-                episode=req.episode,
-            )
-            label = primetv._cfg().get("label", "سيرفر برايم")
-            provider_args = {
-                "tmdb_id": req.tmdb_id,
-                "type": req.type,
-                "title": ptitle,
-                "year": info.get("year"),
-                "season": req.season,
-                "episode": req.episode,
+    async def job_vidsrc() -> dict:
+        if not vidsrc.is_enabled():
+            return {"servers": [], "imdb_id": ""}
+        res = await asyncio.to_thread(
+            vidsrc.resolve, req.tmdb_id, req.type, season=req.season, episode=req.episode
+        )
+        label = vidsrc._cfg().get("label", "سيرفر أجنبي")
+        built = []
+        for i, sv in enumerate(res.servers, 1):
+            sid = _new_sid()
+            http_sessions[sid] = {
+                "url": sv["url"],
+                "referer": vidsrc._cfg().get("player_referer", "https://cloudorchestranova.com/"),
+                "kind": "vidsrc",
+                "base_url": sv["base"],
+                "host": sv["host"],
+                "created": time.monotonic(),
             }
-            for i, sv in enumerate(res.servers, 1):
-                sid = _new_sid()
-                http_sessions[sid] = {
-                    "url": sv["url"],
-                    "referer": sv["referer"] or primetv._cfg().get("engine_base_url", ""),
-                    "cookie": sv["cookie"] or "",
-                    "user_agent": sv["user_agent"] or "",
-                    "kind": "primetv",
-                    "idx": i - 1,
-                    "provider": provider_args,
-                    "created": time.monotonic(),
-                }
-                servers.append({
-                    "site": "primetv",
-                    "name": "{} {}".format(label, i),
-                    "kind": sv["kind"],
-                    "quality": sv["quality"],
-                    "proxy_url": base + _proxy_url(sid, sv["url"], ext=_ext_for(sv["kind"])),
-                    "foreign": True,
-                })
-    except Exception as exc:
-        log.warning("primetv provider failed (%s); other servers unaffected", exc)
+            built.append({
+                "site": "vidsrc",
+                "name": "{} {}".format(label, i),
+                "kind": "hls",
+                "proxy_url": base + _proxy_url(sid, sv["url"], ext=_ext_for("hls")),
+                "foreign": True,
+            })
+        return {"servers": built, "imdb_id": res.imdb_id}
+
+    async def job_imdb() -> str:
+        if not subs.is_enabled():
+            return ""
+        try:
+            return await asyncio.to_thread(_tmdb_external_imdb, req.tmdb_id, req.type)
+        except Exception as exc:
+            log.warning("tmdb external_ids failed: %s", exc)
+            return ""
+
+    async def job_primetv() -> list[dict]:
+        if not primetv.is_enabled():
+            return []
+        key = api_key()
+        info = {}
+        if key:
+            try:
+                info = await asyncio.to_thread(tmdb_title, req.tmdb_id, key=key, media_type=req.type)
+            except Exception as exc:
+                log.warning("tmdb_title for primetv failed: %s", exc)
+        ptitle = (info.get("original_title") or info.get("title") or "").strip()
+        res = await asyncio.to_thread(
+            primetv.resolve,
+            req.tmdb_id,
+            req.type,
+            title=ptitle,
+            year=info.get("year"),
+            season=req.season,
+            episode=req.episode,
+        )
+        label = primetv._cfg().get("label", "سيرفر برايم")
+        provider_args = {
+            "tmdb_id": req.tmdb_id,
+            "type": req.type,
+            "title": ptitle,
+            "year": info.get("year"),
+            "season": req.season,
+            "episode": req.episode,
+        }
+        built = []
+        for i, sv in enumerate(res.servers, 1):
+            sid = _new_sid()
+            http_sessions[sid] = {
+                "url": sv["url"],
+                "referer": sv["referer"] or primetv._cfg().get("engine_base_url", ""),
+                "cookie": sv["cookie"] or "",
+                "user_agent": sv["user_agent"] or "",
+                "kind": "primetv",
+                "idx": i - 1,
+                "provider": provider_args,
+                "created": time.monotonic(),
+            }
+            built.append({
+                "site": "primetv",
+                "name": "{} {}".format(label, i),
+                "kind": sv["kind"],
+                "quality": sv["quality"],
+                "proxy_url": base + _proxy_url(sid, sv["url"], ext=_ext_for(sv["kind"])),
+                "foreign": True,
+            })
+        return built
+
+    vidsrc_res, ext_imdb, primetv_servers = await asyncio.gather(
+        job_vidsrc(), job_imdb(), job_primetv()
+    )
+
+    for s in vidsrc_res["servers"]:
+        servers.append(s)
+
+    imdb_id = vidsrc_res["imdb_id"] or ext_imdb or ""
+    sub_langs: list[dict] = []
+    if imdb_id and subs.is_enabled():
+        try:
+            found = await asyncio.to_thread(subs.search, imdb_id)
+            sub_langs = subs.available_languages(found)
+        except Exception as exc:
+            log.warning("subtitle search failed: %s", exc)
+
+    for s in primetv_servers:
+        servers.append(s)
 
     return imdb_id, sub_langs
 
@@ -783,8 +830,9 @@ async def stream(sid: str = Query(""), url: str = Query(...), ref: str = "", sit
     elif http_ep:
         # mp4 media: stream with a RANGED upstream fetch so the CDN serves 206
         # instead of refusing full GETs from the server IP; this also gives
-        # players working seek/Range support.
-        if url.lower().endswith(".mp4"):
+        # players working seek/Range support. Match on the URL *path* — CDN
+        # media URLs carry signed tokens in the query string.
+        if _path_lower(url).endswith(".mp4"):
             client_range = request.headers.get("range") if request is not None else None
             streamed = await asyncio.to_thread(_http_stream, sid, url, client_range)
             if streamed is not None:
@@ -804,16 +852,26 @@ async def stream(sid: str = Query(""), url: str = Query(...), ref: str = "", sit
     is_playlist = bool(
         status is not None
         and 200 <= status < 400
-        and ("mpegurl" in content_type or "m3u8" in content_type or url.lower().endswith(".m3u8"))
+        and ("mpegurl" in content_type or "m3u8" in content_type or _path_lower(url).endswith((".m3u8", ".txt")))
     )
     is_manifest = bool(
         status is not None
         and 200 <= status < 400
-        and ("dash" in content_type or url.lower().endswith((".mpd", "/manifest")))
+        and ("dash" in content_type or _path_lower(url).endswith((".mpd", "/manifest")))
     )
 
-    # token died: refresh the session and retry once for playlists
-    if status is not None and status >= 400 and (url.lower().endswith((".m3u8", ".mpd", ".txt")) or "mpegurl" in content_type or "dash" in content_type):
+    # token died: refresh the session and retry once for playlists. Match on
+    # the URL path + content-type (is_playlist above requires 2xx, which a
+    # dead-token response is not).
+    if (
+        status is not None
+        and status >= 400
+        and (
+            _path_lower(url).endswith((".m3u8", ".txt", ".mpd", "/manifest"))
+            or "mpegurl" in content_type
+            or "dash" in content_type
+        )
+    ):
         new_url = url
         refreshed = False
         if browser_session is not None:
@@ -846,8 +904,8 @@ async def stream(sid: str = Query(""), url: str = Query(...), ref: str = "", sit
             if got:
                 status, content_type, body = got
                 url = new_url
-                is_playlist = 200 <= status < 400 and "mpegurl" in content_type or url.lower().endswith(".m3u8")
-                is_manifest = 200 <= status < 400 and "dash" in content_type or url.lower().endswith((".mpd", "/manifest"))
+                is_playlist = 200 <= status < 400 and ("mpegurl" in content_type or "m3u8" in content_type or _path_lower(url).endswith((".m3u8", ".txt")))
+                is_manifest = 200 <= status < 400 and ("dash" in content_type or _path_lower(url).endswith((".mpd", "/manifest")))
 
     if status is None:
         return Response(status_code=503, content="session unavailable")
@@ -864,7 +922,14 @@ async def stream(sid: str = Query(""), url: str = Query(...), ref: str = "", sit
         return Response(content=rewritten, media_type="application/dash+xml")
 
     stripped = _strip_png_wrapper(body)
-    media_type = "video/mp2t" if stripped is not body else (content_type or "application/octet-stream")
+    if stripped is not body:
+        media_type = "video/mp2t"
+    elif _path_lower(url).endswith(".ts") and _ts_start(stripped) >= 0:
+        # Some CDNs label TS segments as text/plain or octet-stream; ExoPlayer
+        # sniffs containers but prefers an explicit video/mp2t for HLS chunks.
+        media_type = "video/mp2t"
+    else:
+        media_type = content_type or "application/octet-stream"
     return StreamingResponse(iter([stripped]), media_type=media_type)
 
 

@@ -107,7 +107,7 @@ $("frm").addEventListener("submit", async (ev) => {
   const go = $("go");
   go.disabled = true;
   $("results").innerHTML = "";
-  setStatus("جارٍ الكشط وحلّ السيرفرات… قد يستغرق 30-90 ثانية");
+  setStatus("جارٍ الكشط وحلّ السيرفرات… ثوانٍ قليلة");
   try {
     const r = await fetch("/watch", {
       method: "POST",

@@ -51,15 +51,20 @@ class BaseScraper:
         *,
         with_details: bool = True,
         watch_only: bool = False,
+        max_items: int | None = None,
     ) -> list[dict[str, Any]]:
         """Fetch search/listing page(s) and return structured items.
 
         ``watch_only`` drops download links from the result and skips fetching
-        any download sub-pages (watch servers only).
+        any download sub-pages (watch servers only). ``max_items`` caps how many
+        listing results get detail pages fetched (a search for a specific title
+        usually matches its first few cards; fetching every card is wasted work).
         """
         results: list[dict[str, Any]] = []
         for page in self.pages(query):
             results.extend(self.parse_listing(page))
+        if max_items is not None and max_items > 0:
+            results = results[:max_items]
         if with_details:
             saved_extra = None
             if watch_only:

@@ -287,6 +287,78 @@ def test_watch_requires_query_or_tmdb_id(monkeypatch):
     assert r.status_code == 400
 
 
+def test_path_lower_ignores_query_token():
+    """Media-type decisions use the URL path only — CDN URLs carry signed
+    tokens in the query (master.m3u8?t=..&s=..), so endswith() on the raw URL
+    is wrong."""
+    from middleware.server import _path_lower
+
+    assert _path_lower("https://cdn.test/p/master.m3u8?t=abc&s=1786747113") == "/p/master.m3u8"
+    assert _path_lower("https://cdn.test/video.mp4?sign=xyz&e=50") == "/video.mp4"
+    assert _path_lower("https://cdn.test/dash/idx/index_web.mpd?x=1") == "/dash/idx/index_web.mpd"
+
+
+def test_stream_ranges_mp4_with_query_token(monkeypatch):
+    """An mp4 CDN URL carrying a query token must still take the ranged-stream
+    path (path-based detection), not the full-buffer fetch."""
+    from fastapi.testclient import TestClient
+
+    from middleware import server
+
+    server.http_sessions["mp4-sid"] = {
+        "url": "https://cdn.test/movie.mp4?token=xyz",
+        "referer": "https://embed.test/e/1",
+    }
+    calls = {}
+
+    def fake_stream(sid, url, range_header):
+        calls["url"] = url
+        calls["range"] = range_header
+        return 206, "video/mp4", {"Content-Range": "bytes 0-99/1000"}, iter([b"x"] * 100)
+
+    monkeypatch.setattr(server, "_http_stream", fake_stream)
+    try:
+        c = TestClient(server.app)
+        r = c.get(
+            "/stream/mp4-sid.mp4",
+            params={"url": "https://cdn.test/movie.mp4?token=xyz"},
+            headers={"Range": "bytes=0-99"},
+        )
+        assert r.status_code == 206
+        assert calls["url"] == "https://cdn.test/movie.mp4?token=xyz"
+        assert calls["range"] == "bytes=0-99"
+    finally:
+        server.http_sessions.pop("mp4-sid", None)
+
+
+def test_stream_sniffs_mp2t_for_text_plain_ts(monkeypatch):
+    """CDNs sometimes label TS segments text/plain; ExoPlayer prefers an
+    explicit video/mp2t for HLS chunks, so sniff the sync bytes."""
+    from fastapi.testclient import TestClient
+
+    from middleware import server
+
+    ts_packet = b"\x47" + b"\x00" * 187
+    ts = ts_packet * 3
+    server.http_sessions["ts-sid"] = {
+        "url": "https://cdn.test/p/seg.ts",
+        "referer": "https://embed.test/e/1",
+    }
+
+    def fake_fetch(sid, url):
+        return 200, "text/plain", ts
+
+    monkeypatch.setattr(server, "_http_fetch", fake_fetch)
+    try:
+        c = TestClient(server.app)
+        r = c.get("/stream", params={"sid": "ts-sid", "url": "https://cdn.test/p/seg.ts"})
+        assert r.status_code == 200
+        assert r.headers["content-type"] == "video/mp2t"
+        assert r.content.startswith(b"\x47")
+    finally:
+        server.http_sessions.pop("ts-sid", None)
+
+
 def test_direct_endpoint_returns_raw_media_urls(monkeypatch):
     """POST /direct returns CDN URLs without proxy wrapping, with caching."""
     from fastapi.testclient import TestClient

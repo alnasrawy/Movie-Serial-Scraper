@@ -259,6 +259,31 @@ def test_watch_only_skips_download_subpage():
     assert not any("/download" in call for call in F.calls)
 
 
+def test_scrape_max_items_caps_detail_fetches():
+    """max_items must limit how many listing cards get a detail page fetched —
+    the #1 /watch latency driver when a search returns many cards."""
+
+    class F(FakeFetcher):
+        calls: list[str] = []
+
+        def get_soup(self, url: str, **kwargs) -> FetchedPage:
+            F.calls.append(url)
+            return super().get_soup(url, **kwargs)
+
+    scraper = GenericScraper(make_config(), F())
+    items = scraper.scrape("inception", with_details=True, max_items=1)
+    assert len(items) == 1
+    assert items[0]["title"] == "Inception"
+    # 1 search page + 1 detail page (second card's detail is never fetched)
+    assert F.calls == ["https://site.test/search/inception", "https://site.test/movies/inception"]
+
+    # without a cap, both cards get detail pages
+    F.calls.clear()
+    scraper2 = GenericScraper(make_config(), F())
+    scraper2.scrape("inception", with_details=True)
+    assert len(F.calls) == 3
+
+
 def test_sites_load_and_find():
     configs = load_sites("configs")
     names = [c.name for c in configs]
