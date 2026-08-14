@@ -132,7 +132,6 @@ $("frm").addEventListener("submit", async (ev) => {
 
 function render(data) {
   setStatus("الاستعلام: " + data.query + " — وجدنا " + data.servers.length + " سيرفر");
-  const host = new URL(window.location.href).origin;
   const wrap = $("results");
   wrap.innerHTML = "";
   const arabic = data.servers.filter(s => !s.foreign);
@@ -140,7 +139,7 @@ function render(data) {
   for (const s of arabic) {
     const el = document.createElement("div");
     el.className = "server";
-    const url = host + s.proxy_url;
+    const url = s.proxy_url;
     el.innerHTML = `
       <span class="badge">${s.site} · ${s.kind}</span>
       <div class="meta">
@@ -160,7 +159,7 @@ function render(data) {
     for (const s of foreign) {
       const el = document.createElement("div");
       el.className = "server";
-      const url = host + s.proxy_url;
+      const url = s.proxy_url;
       el.innerHTML = `
         <span class="badge">${s.site} · ${s.kind}</span>
         <div class="meta">
@@ -239,7 +238,14 @@ function play(url) {
   const video = $("player");
   subsTrack = null;
   if (hls) { hls.destroy(); hls = null; }
-  if (window.Hls && Hls.isSupported()) {
+  const decoded = decodeURIComponent(url);
+  const isDash = /\.mpd([?]|$)/i.test(decoded);
+  const isMp4 = /\.mp4([?]|$)/i.test(decoded);
+  if (isDash) {
+    setStatus("DASH (مسلسلات برايم) يعمل عبر تطبيق أندرويد (ExoPlayer) — نسخ الرابط للتجربة في مشغل يدعم DASH.", true);
+    return;
+  }
+  if (!isMp4 && window.Hls && Hls.isSupported()) {
     hls = new Hls({ enableWebVTT: true, subtitleDisplay: true });
     attachSubs(video, subsBar);
     hls.loadSource(url);
@@ -249,11 +255,9 @@ function play(url) {
         if (subsTrack !== null) hls.subtitleTrack = subsTrack;
       });
     }
-  } else if (video.canPlayType("application/vnd.apple.mpegurl")) {
+  } else {
     video.src = url;
     attachSubs(video, subsBar);
-  } else {
-    setStatus("المتصفح لا يدعم بث HLS مباشرة.", true);
   }
   video.play().catch(() => {});
 }
@@ -291,21 +295,6 @@ function renderDirect(data) {
     wrap.appendChild(el);
   }
   document.getElementById("results").appendChild(wrap);
-}
-
-function play(url) {
-  const video = $("player");
-  if (hls) { hls.destroy(); hls = null; }
-  if (window.Hls && Hls.isSupported()) {
-    hls = new Hls();
-    hls.loadSource(url);
-    hls.attachMedia(video);
-  } else if (video.canPlayType("application/vnd.apple.mpegurl")) {
-    video.src = url;
-  } else {
-    setStatus("المتصفح لا يدعم بث HLS مباشرة.", true);
-  }
-  video.play().catch(() => {});
 }
 </script>
 </body>
