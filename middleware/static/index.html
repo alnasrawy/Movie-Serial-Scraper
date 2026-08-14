@@ -130,6 +130,10 @@ $("frm").addEventListener("submit", async (ev) => {
   }
 });
 
+function absUrl(proxy) {
+  return /^https?:\/\//i.test(proxy) ? proxy : new URL(proxy, location.href).href;
+}
+
 function render(data) {
   setStatus("الاستعلام: " + data.query + " — وجدنا " + data.servers.length + " سيرفر");
   const wrap = $("results");
@@ -139,7 +143,7 @@ function render(data) {
   for (const s of arabic) {
     const el = document.createElement("div");
     el.className = "server";
-    const url = s.proxy_url;
+    const url = absUrl(s.proxy_url);
     el.innerHTML = `
       <span class="badge">${s.site} · ${s.kind}</span>
       <div class="meta">
@@ -159,7 +163,7 @@ function render(data) {
     for (const s of foreign) {
       const el = document.createElement("div");
       el.className = "server";
-      const url = s.proxy_url;
+      const url = absUrl(s.proxy_url);
       el.innerHTML = `
         <span class="badge">${s.site} · ${s.kind}</span>
         <div class="meta">

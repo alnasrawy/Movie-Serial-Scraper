@@ -761,7 +761,11 @@ async def subtitle(
 async def index() -> Response:
     """The in-browser tester page (add a movie and see the live servers)."""
     page = os.path.join(os.path.dirname(__file__), "static", "index.html")
-    return FileResponse(page, media_type="text/html")
+    return FileResponse(
+        page,
+        media_type="text/html",
+        headers={"Cache-Control": "no-cache, no-store, must-revalidate"},
+    )
 
 
 @app.get("/stream-video")
