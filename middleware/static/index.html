@@ -281,7 +281,8 @@ function attachSubs(video, bar) {
 function renderDirect(data) {
   const wrap = document.createElement("div");
   wrap.className = "card";
-  wrap.innerHTML = `<h3 style="margin:0 0 10px">روابط مباشرة (m3u8) — تعمل في ExoPlayer / VLC مباشرة</h3>`;
+  wrap.innerHTML = `<h3 style="margin:0 0 10px">روابط مباشرة خام (m3u8)</h3>
+    <div style="color:#ffb86b; font-size:13px; margin-bottom:8px">⚠ غالبًا تتطلب Referer ولا تعمل عند لصقها مباشرة في VLC — استخدم روابط السيرفرات (عبر الخادم) بالأعلى للتشغيل.</div>`;
   if (!data.servers.length) {
     wrap.innerHTML += `<div style="color:#9aa4b2">لم يُستخرج رابط مباشر لهذا العنوان.</div>`;
   }
