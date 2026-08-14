@@ -471,6 +471,15 @@ async def watch(req: WatchRequest, request: Request) -> dict:
         })
 
     imdb_id, subtitles_list = await _add_foreign_servers(req, base, servers)
+
+    # Our Arabic sites number servers per page, so "سيرفر 2" repeats across
+    # sites/items. Renumber all non-foreign servers globally (سيرفر 1..N).
+    arabic_n = 0
+    for sv in servers:
+        if not sv.get("foreign"):
+            arabic_n += 1
+            sv["name"] = "سيرفر {}".format(arabic_n)
+
     _prune_sessions()
     _cache_set(cache_key, {"servers": servers, "imdb_id": imdb_id, "subtitles": subtitles_list})
 
