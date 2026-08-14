@@ -43,14 +43,29 @@ scraper/
 middleware/
   http_resolver.py  -> PURE-HTTP resolver (no browser): GET embed -> unpack_packer
                        -> .urlset/master.txt -> HLS with Referer. Cheap/fast path.
+  vidsrc.py         -> foreign provider (vidsrc family) with NO browser: GET the
+                       embed page -> player iframe (static `vs` token) ->
+                       window.CONFIG `api` -> api.php JSON (data.stream_urls may
+                       be base64 ChaCha20 protected) -> wasmtime-decrypt via
+                       `vs.wasm_url` -> GET {host}/generate.php for an IP-bound
+                       JWT -> stamp master.m3u8. Tokens bind to OUR IP, so these
+                       play only through the /stream proxy. wasmtime is a pure
+                       Python WASM runtime (tiny transient memory). Resolve is
+                       cached 10 min (JWT lives ~4h).
+  subtitles.py      -> OpenSubtitles legacy API (rest.opensubtitles.org) keyed
+                       by IMDb id: search -> pick most-downloaded for a language
+                       -> download .gz -> decode (cp1256/utf-8) -> srt->vtt.
+                       Search is cached 30 min; /subtitle does a targeted
+                       `sublanguageid-<lang>` search if the language is missing.
   player.py         -> BrowserManager: long-lived Chromium, per-embed sessions,
                        ctx.request fetch (shares cookies, avoids headless TLS headers),
                        fetch() replays the embed Referer, refresh_session() mints new tokens
   server.py         -> FastAPI app: POST /watch (TMDB id -> ready server list, the
                        main-app contract), POST /direct (raw CDN m3u8 URLs, no
                        proxy/session), POST /resolve, GET /stream (rewrites m3u8,
-                       strips PNG-wrapped TS, auto-refresh on 401/403), /health,
-                       GET / (in-browser tester page, middleware/static/index.html).
+                       strips PNG-wrapped TS, auto-refresh on 401/403), GET /subtitle
+                       (imdb_id + lang -> WebVTT), /health, GET / (in-browser tester
+                       page, middleware/static/index.html).
                        Hybrid resolution: HTTP-first, browser only when BROWSER_ENABLED=1.
 Dockerfile, Dockerfile.lite, docker-compose.yml, render.yaml, .env.example, DEPLOYMENT.md
   -> run the backend on a VPS 24/7; the app calls http://IP:8000/watch.
@@ -100,6 +115,24 @@ tests/              -> 47 tests. conftest.py sets PROJECT_ROOT on sys.path and s
   contains a 0x47 ("G"), so a naive `find(b"\x47")` is WRONG (regression tested).
 - `mixdrop` (reCAPTCHA), `playmogo/dsvplay` (no media start) and `koramaup`
   (obfuscated JS) do **not** resolve yet — document, don't force.
+- **Foreign provider (`vidsrc.py`) is fully HTTP-only** — no browser, ever:
+  the embed iframe `vs` token is static text; the api.php `vs` block (the wasm
+  decryptor) sits at the **top level** of the JSON, NOT inside `data`;
+  `stream_urls` may be a plain array OR base64 ChaCha20(nonce||ciphertext).
+  `wasmtime` is a pure-Python WASM runtime — no sidecar process.
+- **OpenSubtitles legacy API (`subtitles.py`) WAF rules:**
+  - The search URL must use the **numeric** IMDb id (`imdbid-1375666`). The
+    `tt` prefix makes their WAF 302 you into a `_` sinkhole host that fails
+    DNS — it LOOKS like an IP block but is our own URL-format bug (regression
+    tested). Never "fix" this by re-adding `tt`.
+  - Send `X-User-Agent: trailers.to-UA` (the registered UA their own player
+    uses) or you get 403s.
+  - Use `curl_cffi` with `impersonate="chrome131"` (browser TLS fingerprint);
+    plain `requests` fingerprints get rate-limited / DNS-poisoned. On network
+    failure, retry once with `doh_url="https://cloudflare-dns.com/dns-query"`,
+    then fall back to plain requests. `search(imdb_id, lang=...)` appends
+    `sublanguageid-<lang>` — `/subtitle` uses it when a language (e.g. `ara`)
+    is missing from the default result window.
 
 ## Conventions
 

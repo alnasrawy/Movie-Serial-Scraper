@@ -334,6 +334,11 @@ def test_watch_tries_multiple_query_candidates_and_merges(monkeypatch):
     monkeypatch.setattr(server, "_scrape_all", fake_scrape_all)
     monkeypatch.setattr(server, "_resolve_embed", fake_resolve_embed)
 
+    async def fake_foreign(req, base, servers):
+        return "", []
+
+    monkeypatch.setattr(server, "_add_foreign_servers", fake_foreign)
+
     c = TestClient(server.app)
     r = c.post("/watch", json={"tmdb_id": 27205, "type": "movie"})
     assert r.status_code == 200

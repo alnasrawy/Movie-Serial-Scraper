@@ -86,6 +86,8 @@ class WatchRequest(BaseModel):
     type: Literal["movie", "tv"] = "movie"
     query: str | None = None
     sites: list[str] | None = None
+    season: int | None = None
+    episode: int | None = None
 
 
 def _proxy_url(sid: str, media_url: str, name: str = "") -> str:
@@ -137,27 +139,27 @@ async def _resolve_many(servers: list[tuple[dict, dict]], limit: int = 6) -> lis
     return await asyncio.gather(*(one(item, sv) for item, sv in servers))
 
 
-# Per-title result cache: key -> (expires_ts, resolved servers list)
-_watch_cache: dict[tuple, tuple[float, list[dict]]] = {}
+# Per-title result cache: key -> (expires_ts, {"servers", "imdb_id", "subtitles"})
+_watch_cache: dict[tuple, tuple[float, dict]] = {}
 _WATCH_CACHE_TTL = float(os.environ.get("WATCH_CACHE_TTL", "600"))
 _MAX_CACHE_ENTRIES = 200
 
 
-def _cache_get(key: tuple) -> list[dict] | None:
+def _cache_get(key: tuple) -> dict | None:
     entry = _watch_cache.get(key)
     if entry is None:
         return None
-    expires, servers = entry
+    expires, payload = entry
     if time.monotonic() > expires:
         _watch_cache.pop(key, None)
         return None
-    return servers
+    return payload
 
 
-def _cache_set(key: tuple, servers: list[dict]) -> None:
+def _cache_set(key: tuple, payload: dict) -> None:
     if len(_watch_cache) >= _MAX_CACHE_ENTRIES:
         _watch_cache.clear()
-    _watch_cache[key] = (time.monotonic() + _WATCH_CACHE_TTL, servers)
+    _watch_cache[key] = (time.monotonic() + _WATCH_CACHE_TTL, payload)
 
 
 async def _resolve_embed(url: str, referer: str | None) -> dict:
@@ -168,7 +170,7 @@ async def _resolve_embed(url: str, referer: str | None) -> dict:
     got = await asyncio.to_thread(resolve_http, url, referer)
     if got:
         sid = _new_sid()
-        http_sessions[sid] = {"url": got["url"], "referer": url}
+        http_sessions[sid] = {"url": got["url"], "referer": url, "created": time.monotonic()}
         return {"sid": sid, "kind": got["kind"], "url": got["url"], "error": None}
 
     mgr = get_manager()
@@ -265,7 +267,8 @@ async def watch(req: WatchRequest, request: Request) -> dict:
     """Main-app contract: TMDB id (or raw query) -> list of playable servers.
 
     Body: {"tmdb_id": 27205, "type": "movie", "sites": ["akwams", "egydead"]}
-    Returns: {"tmdb_id", "type", "query", "servers": [{name, site, kind, proxy_url}]}
+    Returns: {"tmdb_id", "type", "query", "imdb_id", "subtitles",
+              "servers": [{name, site, kind, proxy_url}]}
     """
     sites = [s.strip() for s in (req.sites or ["akwams", "egydead"]) if s.strip()]
     if not sites:
@@ -302,8 +305,10 @@ async def watch(req: WatchRequest, request: Request) -> dict:
             "tmdb_id": req.tmdb_id,
             "type": req.type,
             "query": query,
+            "imdb_id": cached.get("imdb_id"),
+            "subtitles": cached.get("subtitles") or [],
             "cached": True,
-            "servers": cached,
+            "servers": cached["servers"],
         }
 
     merged_items: list[dict] = []
@@ -336,14 +341,70 @@ async def watch(req: WatchRequest, request: Request) -> dict:
             "proxy_url": base + _proxy_url(res["sid"], res["url"]),
         })
 
-    _cache_set(cache_key, servers)
+    imdb_id, subtitles_list = await _add_foreign_servers(req, base, servers)
+    _prune_sessions()
+    _cache_set(cache_key, {"servers": servers, "imdb_id": imdb_id, "subtitles": subtitles_list})
 
     return {
         "tmdb_id": req.tmdb_id,
         "type": req.type,
         "query": query,
+        "imdb_id": imdb_id or None,
+        "subtitles": subtitles_list,
         "servers": servers,
     }
+
+
+def _prune_sessions(max_age: float = 86400.0) -> None:
+    """Drop stale HTTP sessions so long-running servers don't leak memory."""
+    now = time.monotonic()
+    stale = [sid for sid, ep in http_sessions.items() if now - ep.get("created", now) > max_age]
+    for sid in stale:
+        http_sessions.pop(sid, None)
+
+
+async def _add_foreign_servers(req: WatchRequest, base: str, servers: list[dict]) -> tuple[str, list[dict]]:
+    """Resolve foreign (vidsrc) streams for a TMDB id and append proxied servers.
+
+    Returns (imdb_id, subtitle languages) — the former is needed by the app to
+    fetch subtitles later via /subtitle.
+    """
+    if not req.tmdb_id:
+        return "", []
+    from . import subtitles as subs
+    from . import vidsrc
+
+    imdb_id, sub_langs = "", []
+    try:
+        if vidsrc.is_enabled():
+            res = await asyncio.to_thread(
+                vidsrc.resolve, req.tmdb_id, req.type, season=req.season, episode=req.episode
+            )
+            label = vidsrc._cfg().get("label", "سيرفر أجنبي")
+            for i, sv in enumerate(res.servers, 1):
+                sid = _new_sid()
+                http_sessions[sid] = {
+                    "url": sv["url"],
+                    "referer": vidsrc._cfg().get("player_referer", "https://cloudorchestranova.com/"),
+                    "kind": "vidsrc",
+                    "base_url": sv["base"],
+                    "host": sv["host"],
+                    "created": time.monotonic(),
+                }
+                servers.append({
+                    "site": "vidsrc",
+                    "name": "{} {}".format(label, i),
+                    "kind": "hls",
+                    "proxy_url": base + _proxy_url(sid, sv["url"]),
+                    "foreign": True,
+                })
+            imdb_id = res.imdb_id
+            if imdb_id and subs.is_enabled():
+                found = await asyncio.to_thread(subs.search, imdb_id)
+                sub_langs = subs.available_languages(found)
+    except Exception as exc:
+        log.warning("foreign/subtitle providers failed (%s); Arabic servers unaffected", exc)
+    return imdb_id, sub_langs
 
 
 # Same cache namespace pattern but for /direct (raw media URLs, no proxy).
@@ -460,12 +521,24 @@ async def stream(sid: str = Query(...), url: str = Query(...)) -> Response:
             refreshed = await mgr.refresh_session(sid)
             new_url = getattr(browser_session, "new_url", url)
         elif http_ep:
-            # HTTP sessions: re-resolve the embed and mint a fresh URL
-            re_got = await asyncio.to_thread(resolve_http, http_ep["referer"], None)
-            if re_got:
-                http_ep["url"] = re_got["url"]
-                new_url = re_got["url"]
-                refreshed = True
+            # HTTP sessions: re-resolve the embed and mint a fresh URL. For
+            # vidsrc sessions the stream data is static — just re-mint the
+            # host JWT and restamp the (token-less) master playlist URL.
+            from . import vidsrc
+
+            if http_ep.get("kind") == "vidsrc":
+                new_url = await asyncio.to_thread(
+                    vidsrc.restamp_master, http_ep.get("base_url") or url, http_ep.get("host") or ""
+                )
+                refreshed = bool(new_url)
+            else:
+                re_got = await asyncio.to_thread(resolve_http, http_ep["referer"], None)
+                if re_got:
+                    http_ep["url"] = re_got["url"]
+                    new_url = re_got["url"]
+                    refreshed = True
+            if refreshed:
+                http_ep["url"] = new_url
         if refreshed:
             got = await mgr.fetch(sid, new_url) if browser_session is not None else await asyncio.to_thread(_http_fetch, sid, new_url)
             if got:
@@ -486,6 +559,42 @@ async def stream(sid: str = Query(...), url: str = Query(...)) -> Response:
     stripped = _strip_png_wrapper(body)
     media_type = "video/mp2t" if stripped is not body else (content_type or "application/octet-stream")
     return StreamingResponse(iter([stripped]), media_type=media_type)
+
+
+@app.get("/subtitle")
+async def subtitle(
+    imdb_id: str = Query(...),
+    lang: str = Query("ara"),
+    fmt: Literal["vtt", "srt"] = Query("vtt"),
+) -> Response:
+    """Serve a subtitle (converted to WebVTT) for an IMDb id and language.
+
+    Re-searches OpenSubtitles fresh each time (the signed download links are
+    short-lived), picks the highest-downloaded match for `lang`, downloads,
+    decompresses and converts. Returns ``text/vtt`` for the native players.
+    """
+    from . import subtitles as subs
+
+    if not subs.is_enabled():
+        raise HTTPException(503, "subtitles disabled")
+    found = await asyncio.to_thread(subs.search, imdb_id)
+    best = subs.best_for_language(found, lang)
+    if best is None:
+        # A language outside the default result window needs a precise search.
+        found = await asyncio.to_thread(subs.search, imdb_id, lang=lang)
+        best = subs.best_for_language(found, lang)
+    if best is None:
+        raise HTTPException(404, "no subtitle for language %r" % lang)
+    url = best.get("SubDownloadLink") or best.get("ZipDownloadLink")
+    if not url:
+        raise HTTPException(404, "subtitle has no download link")
+    fetched = await asyncio.to_thread(subs.fetch_subtitle, url)
+    if not fetched:
+        raise HTTPException(502, "subtitle download failed")
+    text, _ = fetched
+    if fmt == "srt":
+        return Response(content=text, media_type="text/plain; charset=utf-8")
+    return Response(content=subs.srt_to_vtt(text), media_type="text/vtt; charset=utf-8")
 
 
 @app.get("/", include_in_schema=False)
@@ -512,10 +621,15 @@ async def close_session(sid: str) -> dict:
 
 @app.get("/health")
 async def health() -> dict:
+    from . import subtitles as subs
+    from . import vidsrc
+
     mgr = get_manager()
     n_browser = len(mgr.sessions) if mgr is not None else 0
     return {
         "ok": True,
         "sessions": n_browser + len(http_sessions),
         "cache_entries": len(_watch_cache),
+        "vidsrc_enabled": vidsrc.is_enabled(),
+        "subtitles_enabled": subs.is_enabled(),
     }

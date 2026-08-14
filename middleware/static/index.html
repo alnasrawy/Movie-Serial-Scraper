@@ -125,7 +125,9 @@ function render(data) {
   const host = new URL(window.location.href).origin;
   const wrap = $("results");
   wrap.innerHTML = "";
-  for (const s of data.servers) {
+  const arabic = data.servers.filter(s => !s.foreign);
+  const foreign = data.servers.filter(s => s.foreign);
+  for (const s of arabic) {
     const el = document.createElement("div");
     el.className = "server";
     const url = host + s.proxy_url;
@@ -141,7 +143,121 @@ function render(data) {
     el.querySelector(".btn-copy").onclick = () => navigator.clipboard.writeText(url).then(() => setStatus("تم نسخ الرابط"));
     wrap.appendChild(el);
   }
+  if (foreign.length) {
+    const card = document.createElement("div");
+    card.className = "card";
+    card.innerHTML = `<h3 style="margin:0 0 10px">سيرفرات أجنبية (عبر الخادم)</h3>`;
+    for (const s of foreign) {
+      const el = document.createElement("div");
+      el.className = "server";
+      const url = host + s.proxy_url;
+      el.innerHTML = `
+        <span class="badge">${s.site} · ${s.kind}</span>
+        <div class="meta">
+          <div class="name">${s.name}</div>
+          <div class="url">${url}</div>
+        </div>
+        <button class="btn btn-play">تشغيل</button>
+        <button class="btn btn-copy">نسخ</button>`;
+      el.querySelector(".btn-play").onclick = () => play(url);
+      el.querySelector(".btn-copy").onclick = () => navigator.clipboard.writeText(url).then(() => setStatus("تم نسخ الرابط"));
+      card.appendChild(el);
+    }
+    wrap.appendChild(card);
+  }
   if (!data.servers.length) setStatus("لم يُعثر على سيرفرات قابلة للتشغيل لهذا العنوان.");
+  renderSubs(data.subtitles || [], data.imdb_id || "");
+}
+
+let subsBar = null;
+let subsTrack = null;
+
+// Always offer the common languages (Arabic first) even when a title's top
+// OpenSubtitles matches don't list them; /subtitle does a targeted search.
+const COMMON_SUB_LANGS = [
+  ["ara", "العربية"],
+  ["eng", "English"],
+  ["per", "فارسی"],
+  ["tur", "Türkçe"],
+  ["fre", "Français"],
+  ["spa", "Español"],
+  ["ger", "Deutsch"],
+  ["rus", "Русский"],
+  ["hin", "हिन्दी"],
+];
+
+function renderSubs(subs, imdbId) {
+  const old = document.getElementById("subs-card");
+  if (old) old.remove();
+  subsBar = null;
+  subsTrack = null;
+  if (!imdbId) return;
+  const byCode = new Map();
+  for (const [code, name] of COMMON_SUB_LANGS) byCode.set(code, { code, name, count: 0 });
+  for (const s of subs) {
+    const hit = byCode.get(s.code);
+    if (hit) { hit.count = s.count || hit.count; }
+    else byCode.set(s.code, { code: s.code, name: s.name || s.code, count: s.count || 0 });
+  }
+  const merged = [...byCode.values()];
+  subsBar = { subs: merged, imdbId };
+  const card = document.createElement("div");
+  card.className = "card";
+  card.id = "subs-card";
+  card.innerHTML = `
+    <h3 style="margin:0 0 10px">الترجمة</h3>
+    <label for="subs-sel">اختر لغة الترجمة (تُحمَّل أثناء التشغيل)</label>
+    <select id="subs-sel">
+      <option value="">بدون ترجمة</option>
+      ${merged.map(s => `<option value="${s.code}">${s.name}${s.count ? " (" + s.count + ")" : ""}</option>`).join("")}
+    </select>`;
+  card.querySelector("#subs-sel").addEventListener("change", (ev) => setSubtitle(ev.target.value));
+  document.getElementById("results").appendChild(card);
+}
+
+function setSubtitle(code) {
+  if (!subsBar) return;
+  const i = code ? subsBar.subs.findIndex(s => s.code === code) : -1;
+  subsTrack = i;
+  if (hls) {
+    hls.subtitleTrack = i;
+    hls.subtitleDisplay = i >= 0;
+  }
+}
+
+function play(url) {
+  const video = $("player");
+  subsTrack = null;
+  if (hls) { hls.destroy(); hls = null; }
+  if (window.Hls && Hls.isSupported()) {
+    hls = new Hls({ enableWebVTT: true, subtitleDisplay: true });
+    attachSubs(video, subsBar);
+    hls.loadSource(url);
+    hls.attachMedia(video);
+    if (subsBar) {
+      hls.on(Hls.Events.SUBTITLE_TRACKS_UPDATED, () => {
+        if (subsTrack !== null) hls.subtitleTrack = subsTrack;
+      });
+    }
+  } else if (video.canPlayType("application/vnd.apple.mpegurl")) {
+    video.src = url;
+    attachSubs(video, subsBar);
+  } else {
+    setStatus("المتصفح لا يدعم بث HLS مباشرة.", true);
+  }
+  video.play().catch(() => {});
+}
+
+function attachSubs(video, bar) {
+  if (!bar) return;
+  for (const s of bar.subs) {
+    const t = document.createElement("track");
+    t.kind = "subtitles";
+    t.label = s.name;
+    t.srclang = s.code;
+    t.src = `/subtitle?imdb_id=${encodeURIComponent(bar.imdbId)}&lang=${encodeURIComponent(s.code)}&fmt=vtt`;
+    video.appendChild(t);
+  }
 }
 
 function renderDirect(data) {
