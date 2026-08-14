@@ -619,6 +619,39 @@ async def close_session(sid: str) -> dict:
     return {"ok": True}
 
 
+@app.get("/debug-subs")
+async def debug_subs(imdb_id: str = "1375666") -> dict:
+    """TEMP diagnostic: raw search result per HTTP stack (remove after diagnosis)."""
+    from . import subtitles as subs
+
+    out = {"curl_cffi": bool(getattr(subs, "_IMPERSONATE", None)), "steps": []}
+    url = subs._cfg()["search_base"].format(imdb=imdb)
+    headers = {
+        "User-Agent": subs._ua(), "Accept": "application/json",
+        "X-User-Agent": subs._cfg().get("x_user_agent") or "trailers.to-UA",
+    }
+    for label, kw in (("impersonate", {}), ("doh", {"doh_url": "https://cloudflare-dns.com/dns-query"})):
+        try:
+            from curl_cffi import requests as cr
+            r = cr.get(url, impersonate="chrome131", headers=headers, timeout=20, **kw)
+            out["steps"].append({
+                "stack": label, "status": r.status_code,
+                "ct": r.headers.get("content-type", "")[:40], "len": len(r.content),
+            })
+        except Exception as exc:
+            out["steps"].append({"stack": label, "error": str(exc)[:120]})
+    try:
+        import requests
+        r = requests.get(url, headers=headers, timeout=20)
+        out["steps"].append({
+            "stack": "requests", "status": r.status_code,
+            "ct": r.headers.get("content-type", "")[:40], "len": len(r.content),
+        })
+    except Exception as exc:
+        out["steps"].append({"stack": "requests", "error": str(exc)[:120]})
+    return out
+
+
 @app.get("/health")
 async def health() -> dict:
     from . import subtitles as subs
