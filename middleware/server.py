@@ -90,13 +90,29 @@ class WatchRequest(BaseModel):
     episode: int | None = None
 
 
-def _proxy_url(sid: str, media_url: str, name: str = "", ref: str = "", site_ref: str = "") -> str:
-    q = {"sid": sid, "url": media_url}
+def _ext_for(kind: str) -> str:
+    """A URL path extension hinting the media type.
+
+    ExoPlayer (Media3) picks HLS/DASH by the URI's extension and does NOT sniff
+    a plain playlist/mpd text. The proxy URL path must therefore end in
+    .m3u8/.mpd or ExoPlayer treats the stream as a (sniffable) container and
+    fails. Sub-resources inside a playlist are consumed by the already-selected
+    HlsMediaSource/DashMediaSource, so only the top-level URL needs the hint.
+    """
+    if kind == "hls":
+        return ".m3u8"
+    if kind == "dash":
+        return ".mpd"
+    return ".mp4"
+
+
+def _proxy_url(sid: str, media_url: str, name: str = "", ref: str = "", site_ref: str = "", ext: str = "") -> str:
+    q = {"url": media_url}
     if ref:
         q["ref"] = ref
     if site_ref:
         q["site_ref"] = site_ref
-    return "/stream?" + urlencode(q)
+    return "/stream/{}{}?{}".format(sid, ext, urlencode(q))
 
 
 def _scrape_site(name: str, query: str) -> list[dict]:
@@ -382,7 +398,7 @@ async def resolve(req: ResolveRequest, request: Request) -> dict:
     result = await _resolve_embed(req.url, req.referer)
     if result.get("kind") != "none":
         base = str(request.base_url).rstrip("/")
-        result["proxy_url"] = base + _proxy_url(result["sid"], result["url"])
+        result["proxy_url"] = base + _proxy_url(result["sid"], result["url"], ext=_ext_for(result["kind"]))
     else:
         result["proxy_url"] = None
     return result
@@ -476,6 +492,7 @@ async def watch(req: WatchRequest, request: Request) -> dict:
                 res["sid"], res["url"],
                 ref=sv.get("url") or "",
                 site_ref=item.get("detail_url") or "",
+                ext=_ext_for(res["kind"]),
             ),
         })
 
@@ -573,7 +590,7 @@ async def _add_foreign_servers(req: WatchRequest, base: str, servers: list[dict]
                     "site": "vidsrc",
                     "name": "{} {}".format(label, i),
                     "kind": "hls",
-                    "proxy_url": base + _proxy_url(sid, sv["url"]),
+                    "proxy_url": base + _proxy_url(sid, sv["url"], ext=_ext_for("hls")),
                     "foreign": True,
                 })
             imdb_id = res.imdb_id
@@ -639,7 +656,7 @@ async def _add_foreign_servers(req: WatchRequest, base: str, servers: list[dict]
                     "name": "{} {}".format(label, i),
                     "kind": sv["kind"],
                     "quality": sv["quality"],
-                    "proxy_url": base + _proxy_url(sid, sv["url"]),
+                    "proxy_url": base + _proxy_url(sid, sv["url"], ext=_ext_for(sv["kind"])),
                     "foreign": True,
                 })
     except Exception as exc:
@@ -735,7 +752,13 @@ async def direct(req: WatchRequest) -> dict:
 
 
 @app.get("/stream")
-async def stream(sid: str = Query(...), url: str = Query(...), ref: str = "", site_ref: str = "", request: Request = None) -> Response:
+@app.get("/stream/{tail}")
+async def stream(sid: str = Query(""), url: str = Query(...), ref: str = "", site_ref: str = "", tail: str = "", request: Request = None) -> Response:
+    # The sid lives in the URL path (/stream/{sid}.m3u8?url=...) so ExoPlayer
+    # can infer HLS/DASH from the extension; the query form (?sid=..) is also
+    # supported for backwards compatibility and sub-resource URLs.
+    if not sid and tail:
+        sid = tail.split(".", 1)[0]
     status, content_type, body = None, "", b""
     mgr = get_manager()
     browser_session = mgr.sessions.get(sid) if mgr is not None else None

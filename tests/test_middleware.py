@@ -22,8 +22,21 @@ def test_proxy_url_encodes_media_url():
     from middleware.server import _proxy_url
 
     url = _proxy_url("abc123", "https://cdn.example/x/y/master.m3u8")
-    assert url.startswith("/stream?sid=abc123&url=")
+    assert url.startswith("/stream/abc123?url=")
     assert "https%3A%2F%2Fcdn.example%2Fx%2Fy%2Fmaster.m3u8" in url
+
+
+def test_proxy_url_ext_hints_media_type_for_exoplayer():
+    from middleware.server import _ext_for, _proxy_url
+
+    assert _ext_for("hls") == ".m3u8"
+    assert _ext_for("dash") == ".mpd"
+    assert _ext_for("mp4") == ".mp4"
+    assert _ext_for("unknown") == ".mp4"
+    # ExoPlayer infers HLS/DASH from the URL's last path-segment extension.
+    assert _proxy_url("abc", "https://c/x.m3u8", ext=_ext_for("hls")).startswith("/stream/abc.m3u8?")
+    assert _proxy_url("abc", "https://c/x.mpd", ext=_ext_for("dash")).startswith("/stream/abc.mpd?")
+    assert _proxy_url("abc", "https://c/x.mp4", ext=_ext_for("mp4")).startswith("/stream/abc.mp4?")
 
 
 def test_rewrite_m3u8_wraps_segment_uris():
@@ -32,17 +45,17 @@ def test_rewrite_m3u8_wraps_segment_uris():
     lines = out.splitlines()
     assert lines[0] == "#EXTM3U"
     assert lines[1].startswith("#EXT-X-STREAM-INF")
-    assert lines[2].startswith("/stream?sid=sid1&url=")
+    assert lines[2].startswith("/stream/sid1?url=")
     assert "path%2Fmaster.m3u8" in lines[2]
-    assert lines[3].startswith("/stream?sid=sid1&url=")
+    assert lines[3].startswith("/stream/sid1?url=")
     assert "path%2Fseg-1.ts" in lines[3]
 
 
 def test_rewrite_m3u8_rewrites_uri_attribute():
     m3u8 = '#EXT-X-KEY:METHOD=AES-128,URI="key.bin"\nseg.m3u8\n'
     out = _rewrite(m3u8, "https://cdn.test/p/pl.m3u8", "s")
-    assert "/stream?sid=s&url=" in out
-    assert 'URI="/stream?sid=s&url=' in out
+    assert "/stream/s?url=" in out
+    assert 'URI="/stream/s?url=' in out
 
 
 def test_rewrite_m3u8_joins_relative_to_base():
@@ -145,7 +158,7 @@ def test_stream_rewrites_playlist(client):
     assert r.headers["content-type"].startswith("application/vnd.apple.mpegurl")
     body = r.text
     assert body.startswith("#EXTM3U")
-    assert "/stream?sid=test-sid&url=" in body
+    assert "/stream/test-sid?url=" in body
     assert "seg-1.ts" in body
 
 
@@ -194,7 +207,8 @@ def test_watch_endpoint_returns_server_list(monkeypatch):
     assert first["name"] == "سيرفر 1"
     assert first["site"] == "akwams"
     assert first["kind"] == "hls"
-    assert first["proxy_url"].startswith("http://testserver/stream?sid=")
+    assert first["proxy_url"].startswith("http://testserver/stream/")
+    assert ".m3u8?" in first["proxy_url"]
 
 
 def test_stream_serves_http_session_without_browser(monkeypatch):
@@ -216,7 +230,7 @@ def test_stream_serves_http_session_without_browser(monkeypatch):
         c = TestClient(server.app)
         r = c.get("/stream", params={"sid": "http-sid", "url": "https://cdn.test/p/master.m3u8"})
         assert r.status_code == 200
-        assert "/stream?sid=http-sid&url=" in r.text
+        assert "/stream/http-sid?url=" in r.text
         assert "seg-1.ts" in r.text
     finally:
         server.http_sessions.pop("http-sid", None)
@@ -247,9 +261,8 @@ def test_stream_self_heals_when_session_missing(monkeypatch):
     try:
         c = TestClient(server.app)
         r = c.get(
-            "/stream",
+            "/stream/missing-sid.m3u8",
             params={
-                "sid": "missing-sid",
                 "url": "https://cdn.test/p/old.m3u8",
                 "ref": "https://embed.test/e/1",
                 "site_ref": "https://tv10.egydead.live/movie/x",
@@ -473,9 +486,9 @@ def test_rewrite_mpd_wraps_baseurl_and_templates():
         '</MPD>\n'
     )
     out = _rewrite_mpd(mpd, "https://cdn.test/dash/idx/index_web.mpd", "s")
-    assert "<BaseURL>/stream?sid=s&url=https%3A%2F%2Fcdn.test%2Fdash%2Fidx%2Fsegments%2F</BaseURL>" in out
-    assert 'media="/stream?sid=s&url=https%3A%2F%2Fcdn.test%2Fdash%2Fidx%2Fv$Number$.m4s"' in out
-    assert 'initialization="/stream?sid=s&url=https%3A%2F%2Fcdn.test%2Fdash%2Fidx%2Finit.mp4"' in out
+    assert "<BaseURL>/stream/s?url=https%3A%2F%2Fcdn.test%2Fdash%2Fidx%2Fsegments%2F</BaseURL>" in out
+    assert 'media="/stream/s?url=https%3A%2F%2Fcdn.test%2Fdash%2Fidx%2Fv$Number$.m4s"' in out
+    assert 'initialization="/stream/s?url=https%3A%2F%2Fcdn.test%2Fdash%2Fidx%2Finit.mp4"' in out
     assert "https%3A%2F%2Fother.test%2Fx%2F" in out
     assert out.startswith("<MPD>")
     assert "$Number$" in out  # template vars preserved for the player to fill
@@ -492,8 +505,8 @@ def test_rewrite_mpd_keeps_printf_template_tokens_literal():
         "</MPD>\n"
     )
     out = _rewrite_mpd(mpd, "https://cdn.test/dash/idx/index_web.mpd", "s")
-    assert 'media="/stream?sid=s&url=https%3A%2F%2Fcdn.test%2Fdash%2Fidx%2Fchunk-stream$RepresentationID$-$Number%05d$.m4s"' in out
-    assert 'initialization="/stream?sid=s&url=https%3A%2F%2Fcdn.test%2Fdash%2Fidx%2Finit-stream$RepresentationID$.m4s"' in out
+    assert 'media="/stream/s?url=https%3A%2F%2Fcdn.test%2Fdash%2Fidx%2Fchunk-stream$RepresentationID$-$Number%05d$.m4s"' in out
+    assert 'initialization="/stream/s?url=https%3A%2F%2Fcdn.test%2Fdash%2Fidx%2Finit-stream$RepresentationID$.m4s"' in out
     assert "%25" not in out  # no double-encoded %
 
 
@@ -536,7 +549,7 @@ def test_stream_rewrites_dash_manifest(monkeypatch):
     r = c.get("/stream", params={"sid": "dash-sid", "url": "https://cdn.test/dash/idx/index_web.mpd"})
     assert r.status_code == 200
     assert r.headers["content-type"].startswith("application/dash+xml")
-    assert 'media="/stream?sid=dash-sid&url=' in r.text
+    assert 'media="/stream/dash-sid?url=' in r.text
     assert "v$Number$.m4s" in r.text
 
 
@@ -602,7 +615,8 @@ def test_watch_adds_primetv_foreign_servers(monkeypatch):
         assert len(pt) == 1
         assert pt[0]["name"] == "سيرفر برايم 1"
         assert pt[0]["kind"] == "dash"
-        assert pt[0]["proxy_url"].startswith("http://testserver/stream?sid=")
+        assert pt[0]["proxy_url"].startswith("http://testserver/stream/")
+        assert ".mpd?" in pt[0]["proxy_url"]
         sessions = [ep for ep in server.http_sessions.values() if ep.get("kind") == "primetv"]
         assert len(sessions) == 1
         assert sessions[0]["cookie"] == "CloudFront-Policy=eyJZ;"
