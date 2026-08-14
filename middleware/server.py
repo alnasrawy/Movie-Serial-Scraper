@@ -25,7 +25,7 @@ import os
 import re
 import time
 import uuid
-from typing import Literal
+from typing import Any, Literal
 from urllib.parse import urljoin, urlencode
 
 from fastapi import FastAPI, HTTPException, Query, Request
@@ -326,6 +326,49 @@ def _http_fetch(sid: str, url: str) -> tuple[int, str, bytes] | None:
         return resp.status_code, resp.headers.get("content-type", ""), resp.content
     except _plain.RequestException as exc:
         log.debug("http-proxy fetch failed for %s: %s", url, exc)
+        return None
+
+
+def _http_stream(sid: str, url: str, range_header: str | None) -> tuple[int, str, dict, Any] | None:
+    """Open a RANGED upstream stream for media (mp4).
+
+    The video CDNs refuse full (un-ranged) GETs from datacenter IPs with 502 but
+    serve the same URL as 206 to a ranged request. Players (VLC/ExoPlayer) seek
+    via Range anyway, so /stream must forward the client's Range and stream the
+    upstream body back instead of buffering the whole file.
+    """
+    import requests as _plain
+
+    try:
+        from curl_cffi import requests as _imp
+    except Exception:
+        _imp = None
+
+    ep = http_sessions.get(sid)
+    if not ep:
+        return None
+    headers = {
+        "User-Agent": ep.get("user_agent")
+        or "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+        "(KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36",
+        "Referer": ep["referer"],
+        "Accept": "*/*",
+        "Range": range_header or "bytes=0-",
+    }
+    cookie = ep.get("cookie")
+    if cookie:
+        headers["Cookie"] = cookie
+    try:
+        if _imp is not None:
+            resp = _imp.get(url, impersonate="chrome131", headers=headers, timeout=30, stream=True)
+            return resp.status_code, resp.headers.get("content-type", ""), resp.headers, resp.iter_content(chunk_size=65536)
+    except Exception as exc:
+        log.debug("http-proxy ranged stream failed for %s: %s", url, exc)
+    try:
+        resp = _plain.get(url, headers=headers, timeout=30, stream=True)
+        return resp.status_code, resp.headers.get("content-type", ""), resp.headers, resp.iter_content(chunk_size=65536)
+    except _plain.RequestException as exc:
+        log.debug("http-proxy ranged stream fallback failed for %s: %s", url, exc)
         return None
 
 
@@ -674,7 +717,7 @@ async def direct(req: WatchRequest) -> dict:
 
 
 @app.get("/stream")
-async def stream(sid: str = Query(...), url: str = Query(...)) -> Response:
+async def stream(sid: str = Query(...), url: str = Query(...), request: Request = None) -> Response:
     status, content_type, body = None, "", b""
     mgr = get_manager()
     browser_session = mgr.sessions.get(sid) if mgr is not None else None
@@ -685,6 +728,22 @@ async def stream(sid: str = Query(...), url: str = Query(...)) -> Response:
         if got:
             status, content_type, body = got
     elif http_ep:
+        # mp4 media: stream with a RANGED upstream fetch so the CDN serves 206
+        # instead of refusing full GETs from the server IP; this also gives
+        # players working seek/Range support.
+        if url.lower().endswith(".mp4"):
+            client_range = request.headers.get("range") if request is not None else None
+            streamed = await asyncio.to_thread(_http_stream, sid, url, client_range)
+            if streamed is not None:
+                up_status, up_ct, up_headers, chunks = streamed
+                if up_status >= 400:
+                    return Response(status_code=up_status, content=b"", media_type=up_ct or "text/plain")
+                pass_headers = {
+                    k: v
+                    for k, v in up_headers.items()
+                    if k.lower() in ("content-range", "content-length", "accept-ranges", "content-type")
+                }
+                return StreamingResponse(chunks, media_type=up_ct or "video/mp4", status_code=up_status, headers=pass_headers)
         got = await asyncio.to_thread(_http_fetch, sid, url)
         if got:
             status, content_type, body = got
