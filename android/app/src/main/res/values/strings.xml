@@ -1,0 +1,30 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">أفلام ومسلسلات</string>
+
+    <string name="home_title">الرئيسية</string>
+    <string name="search_hint">ابحث عن فيلم أو مسلسل…</string>
+    <string name="search_button">بحث</string>
+    <string name="section_popular_movies">الأفلام الأكثر مشاهدة</string>
+    <string name="section_popular_tv">أشهر المسلسلات</string>
+    <string name="section_trending">الرائج هذا الأسبوع</string>
+
+    <string name="watch_title">السيرفرات</string>
+    <string name="watch_loading">جاري تجهيز السيرفرات…</string>
+    <string name="watch_empty">لا توجد سيرفرات متاحة لهذا العنوان الآن.</string>
+    <string name="watch_refresh">إعادة المحاولة</string>
+    <string name="watch_error">تعذر الاتصال بالخادم. تأكد من اتصالك بالإنترنت.</string>
+    <string name="season_label">الموسم</string>
+    <string name="episode_label">الحلقة</string>
+    <string name="server_name">سيرفر %1$d</string>
+    <string name="server_kind_hls">بث HLS</string>
+    <string name="server_kind_mp4">مباشر MP4</string>
+    <string name="server_site_from">من %1$s</string>
+
+    <string name="player_error">تعذر تشغيل هذا السيرفر.</string>
+    <string name="player_retry">إعادة التشغيل</string>
+
+    <string name="unknown_title">عنوان غير معروف</string>
+    <string name="rating">التقييم %1$s</string>
+    <string name="search_empty">لا توجد نتائج مطابقة.</string>
+</resources>

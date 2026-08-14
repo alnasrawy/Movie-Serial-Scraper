@@ -345,3 +345,76 @@ def test_watch_tries_multiple_query_candidates_and_merges(monkeypatch):
     data = r.json()
     assert len(data["servers"]) == 1
     assert data["servers"][0]["site"] == "akwams"
+
+
+def test_tmdb_popular_proxies_results(monkeypatch):
+    """/tmdb/popular calls TMDB with the server key and returns Arabic items."""
+    from fastapi.testclient import TestClient
+
+    from middleware import server
+
+    def fake_get(url, params=None, timeout=None):
+        assert "api.themoviedb.org/3/movie/popular" in url
+        assert params["api_key"] == "test-key"
+        assert params["language"] == "ar-SA"
+        return SimpleNamespace(
+            raise_for_status=lambda: None,
+            encoding="utf-8",
+            json=lambda: {
+                "page": 1,
+                "total_pages": 5,
+                "results": [{
+                    "id": 27205,
+                    "title": "استهلال",
+                    "original_title": "Inception",
+                    "overview": "نص",
+                    "poster_path": "/abc.jpg",
+                    "vote_average": 8.3,
+                }],
+            },
+        )
+
+    monkeypatch.setenv("TMDB_API_KEY", "test-key")
+    monkeypatch.setattr("requests.get", fake_get)
+
+    c = TestClient(server.app)
+    r = c.get("/tmdb/popular?type=movie")
+    assert r.status_code == 200
+    data = r.json()
+    assert data["page"] == 1
+    assert len(data["items"]) == 1
+    it = data["items"][0]
+    assert it["tmdb_id"] == 27205
+    assert it["title"] == "استهلال"
+    assert it["poster"].startswith("https://image.tmdb.org/t/p/w500")
+
+
+def test_tmdb_search_multi_carries_media_type(monkeypatch):
+    """/tmdb/search uses search/multi so both movies and shows come back."""
+    from fastapi.testclient import TestClient
+
+    from middleware import server
+
+    def fake_get(url, params=None, timeout=None):
+        assert "/search/multi" in url
+        assert params["query"] == "inception"
+        return SimpleNamespace(
+            raise_for_status=lambda: None,
+            encoding="utf-8",
+            json=lambda: {
+                "results": [
+                    {"id": 27205, "media_type": "movie", "title": "Inception"},
+                    {"id": 1, "media_type": "tv", "name": "Show", "poster_path": "/p.jpg"},
+                ]
+            },
+        )
+
+    monkeypatch.setenv("TMDB_API_KEY", "test-key")
+    monkeypatch.setattr("requests.get", fake_get)
+
+    c = TestClient(server.app)
+    r = c.get("/tmdb/search?q=inception")
+    assert r.status_code == 200
+    items = r.json()["items"]
+    assert [i["media_type"] for i in items] == ["movie", "tv"]
+    assert items[1]["poster"].startswith("https://image.tmdb.org/t/p/w500")

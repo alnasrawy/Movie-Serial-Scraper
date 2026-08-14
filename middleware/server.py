@@ -619,30 +619,78 @@ async def close_session(sid: str) -> dict:
     return {"ok": True}
 
 
-@app.get("/debug-subs")
-async def debug_subs(imdb_id: str = "1375666") -> dict:
-    """TEMP diagnostic: raw search response from Render (remove after diagnosis)."""
-    import re as _re
+# ---------------------------------------------------------------------------
+# TMDB browse endpoints (server-side key; the app never sees the API key)
+# ---------------------------------------------------------------------------
 
-    from . import subtitles as subs
+_TMDB_API = "https://api.themoviedb.org/3"
+_TMDB_IMAGE = "https://image.tmdb.org/t/p/w500"
 
-    out = {"curl_cffi": bool(getattr(subs, "_IMPERSONATE", None))}
-    imdb = _re.sub(r"^[tT]+", "", (imdb_id or "").strip())
-    url = subs._cfg()["search_base"].format(imdb=imdb)
-    headers = {
-        "User-Agent": subs._ua(), "Accept": "application/json",
-        "X-User-Agent": subs._cfg().get("x_user_agent") or "trailers.to-UA",
+
+def _tmdb_key() -> str:
+    from scraper.tmdb import api_key
+
+    key = api_key()
+    if not key:
+        raise HTTPException(400, "TMDB_API_KEY is not set on the server")
+    return key
+
+
+def _tmdb_items(payload: dict) -> list[dict]:
+    items = []
+    for r in payload.get("results") or []:
+        title = r.get("title") or r.get("name") or ""
+        original = r.get("original_title") or r.get("original_name") or title
+        poster = r.get("poster_path") or ""
+        items.append({
+            "tmdb_id": r.get("id"),
+            "media_type": r.get("media_type") or "movie",
+            "title": title,
+            "original_title": original,
+            "overview": r.get("overview") or "",
+            "poster": _TMDB_IMAGE + poster if poster else "",
+            "vote_average": r.get("vote_average"),
+        })
+    return items
+
+
+def _tmdb_fetch(path: str, params: dict) -> dict:
+    """GET a TMDB endpoint with the server key and an Arabic locale."""
+    import requests as _requests
+
+    key = _tmdb_key()
+    q = dict(params)
+    q.setdefault("language", "ar-SA")
+    resp = _requests.get(_TMDB_API + path, params={"api_key": key, **q}, timeout=20)
+    resp.raise_for_status()
+    resp.encoding = "utf-8"
+    data = resp.json()
+    return {
+        "page": data.get("page"),
+        "total_pages": data.get("total_pages"),
+        "total_results": data.get("total_results"),
+        "items": _tmdb_items(data),
     }
-    try:
-        from curl_cffi import requests as cr
-        r = cr.get(url, impersonate="chrome131", headers=headers, timeout=8)
-        out["status"] = r.status_code
-        out["ct"] = r.headers.get("content-type", "")[:50]
-        out["len"] = len(r.content)
-        out["head"] = r.text[:150]
-    except Exception as exc:
-        out["error"] = str(exc)[:160]
-    return out
+
+
+@app.get("/tmdb/popular")
+async def tmdb_popular(type: str = Query("movie"), page: int = Query(1)) -> dict:
+    kind = "tv" if type == "tv" else "movie"
+    return await asyncio.to_thread(_tmdb_fetch, "/{}/popular".format(kind), {"page": page})
+
+
+@app.get("/tmdb/trending")
+async def tmdb_trending(time: str = Query("week"), page: int = Query(1)) -> dict:
+    return await asyncio.to_thread(
+        _tmdb_fetch, "/trending/all/{}".format(time), {"page": page}
+    )
+
+
+@app.get("/tmdb/search")
+async def tmdb_search(q: str = Query(...), page: int = Query(1)) -> dict:
+    return await asyncio.to_thread(
+        _tmdb_fetch, "/search/multi", {"query": q.strip(), "page": page}
+    )
 
 
 @app.get("/health")

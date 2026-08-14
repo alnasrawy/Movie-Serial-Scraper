@@ -24,7 +24,7 @@ python cli.py --list
 python cli.py --query "inception" --sites "akwams,egydead" --watch-only
 python final_links.py "inception"            # one-shot: scrape + resolve + live HLS links
 python -m middleware                          # standalone FastAPI server (uvicorn :8000)
-python -m pytest tests -q                     # 38 tests, no network needed
+python -m pytest tests -q                     # 68 tests, no network needed
 ```
 
 ## Architecture
@@ -65,7 +65,13 @@ middleware/
                        proxy/session), POST /resolve, GET /stream (rewrites m3u8,
                        strips PNG-wrapped TS, auto-refresh on 401/403), GET /subtitle
                        (imdb_id + lang -> WebVTT), /health, GET / (in-browser tester
-                       page, middleware/static/index.html).
+                       page, middleware/static/index.html), and the TMDB browse
+                       endpoints the Android app uses: GET /tmdb/popular?type=movie|tv,
+                       GET /tmdb/trending?time=week|day, GET /tmdb/search?q=...
+                       (all return {page, total_pages, items:[{tmdb_id, media_type,
+                       title, original_title, overview, poster, vote_average}]} with
+                       language=ar-SA; the API key stays server-side via
+                       scraper.tmdb.api_key — never send it to clients).
                        Hybrid resolution: HTTP-first, browser only when BROWSER_ENABLED=1.
 Dockerfile, Dockerfile.lite, docker-compose.yml, render.yaml, .env.example, DEPLOYMENT.md
   -> run the backend on a VPS 24/7; the app calls http://IP:8000/watch.
@@ -76,7 +82,7 @@ direct_links.py     -> ONE command that prints DIRECT m3u8 media URLs (no proxy)
                        in ExoPlayer/VLC (EarnVids hls2 tokens last ~36h, no Referer).
 final_links.py      -> one command: scrape(watch_only) -> open each embed -> keep a
                        uvicorn proxy alive -> print final http://127.0.0.1:<port>/stream? URLs
-tests/              -> 47 tests. conftest.py sets PROJECT_ROOT on sys.path and starts
+tests/              -> 68 tests. conftest.py sets PROJECT_ROOT on sys.path and starts
                        a local mock site (tests/mock_site.py) — no internet required.
 ```
 
@@ -147,6 +153,25 @@ tests/              -> 47 tests. conftest.py sets PROJECT_ROOT on sys.path and s
   share `scraper/` and `middleware/` (final_links historically broke when
   `manager` was renamed to `get_manager()` — prefer the module-level helpers).
 
+## Android app (android/)
+
+Native Kotlin client built in this repo (see `android/README.md`). Dark, RTL,
+Arabic UI. ExoPlayer (Media3) plays HLS through the backend `/stream` proxy.
+
+- `android/app/src/main/java/com/alnasrawy/tv/data/Api.kt` — OkHttp client,
+  `BASE_URL` constant (default the Render backend; emulator uses
+  `http://10.0.2.2:8000`). Parses with `org.json` (no kapt/ksp).
+- Screens: `MainActivity` (popular movies/tv + trending), `SearchActivity`
+  (TMDB multi-search), `WatchActivity` (`POST /watch` server list; season/
+  episode pickers for tv with debounced reload), `PlayerActivity` (ExoPlayer,
+  landscape, error overlay + retry).
+- The app never sees the TMDB key — it browses `/tmdb/*` and resolves via
+  `/watch`. `proxy_url` is absolute and must be fetched per play (tokens
+  expire).
+- Build only in Android Studio (AGP 8.5.2 / Gradle 8.7 wrapper properties are
+  committed; AS generates the wrapper jar on first open). No local SDK in this
+  repo, so `assembleDebug` cannot be verified here.
+
 ## Roadmap (the mission for the next coding session)
 
 Build the end-user **app** on top of this backend. The AI should design and
@@ -158,6 +183,7 @@ implement, using the files above as reference:
 2. **TMDB-driven interface**: browse/import movies & series from TMDB
    (popular/trending lists, search by id or title) and wire them into the
    scraper pipeline (`scraper.tmdb.tmdb_title` + `search_query` already exist).
+   — Done in `android/`: Home + Search consume `/tmdb/*`.
 3. **Scaling with user count** ("كلما نزل المستخدم أكثر جلبت أفلامًا/مسلسلات أكثر"):
    - a fetch queue + per-TMDB-id cache so the same title is scraped once,
    - a worker that prefetches trending/popular titles on a schedule,
@@ -165,6 +191,10 @@ implement, using the files above as reference:
 4. Keep the ExoPlayer consumption contract: the app should call
    `POST /resolve` at playback time and feed `proxy_url` to the player
    (tokens expire, so resolve-per-play).
+   — App calls `POST /watch` (which resolves + proxies) per play.
+5. Deferred: in-app subtitle UI (backend `/subtitle` works; OpenSubtitles
+   legacy API is Cloudflare-blocked from Render datacenter IPs — production
+   path is opensubtitles.com with a user key).
 
 ## Verification
 
