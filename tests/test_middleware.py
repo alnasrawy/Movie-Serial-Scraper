@@ -222,6 +222,42 @@ def test_stream_serves_http_session_without_browser(monkeypatch):
         server.http_sessions.pop("http-sid", None)
 
 
+def test_stream_self_heals_when_session_missing(monkeypatch):
+    """A /stream link with `ref` re-resolves the embed when the sid is gone.
+
+    Copied links keep working after a server restart (in-memory sessions are
+    wiped) — /stream must re-mint a session from the embed URL.
+    """
+    from fastapi.testclient import TestClient
+
+    from middleware import server
+
+    def fake_resolve_http(embed_url, referer=None):
+        return {"kind": "hls", "url": "https://cdn.test/p/fresh.m3u8", "referer": embed_url}
+
+    def fake_http_fetch(sid, url):
+        assert url == "https://cdn.test/p/fresh.m3u8"
+        return 200, "application/vnd.apple.mpegurl", b"#EXTM3U\nseg-1.ts\nseg-2.ts\n"
+
+    monkeypatch.setattr(server, "resolve_http", fake_resolve_http)
+    monkeypatch.setattr(server, "_http_fetch", fake_http_fetch)
+    try:
+        c = TestClient(server.app)
+        r = c.get(
+            "/stream",
+            params={
+                "sid": "missing-sid",
+                "url": "https://cdn.test/p/old.m3u8",
+                "ref": "https://embed.test/e/1",
+            },
+        )
+        assert r.status_code == 200
+        assert "seg-1.ts" in r.text
+        assert server.http_sessions.get("missing-sid", {}).get("url") == "https://cdn.test/p/fresh.m3u8"
+    finally:
+        server.http_sessions.pop("missing-sid", None)
+
+
 def test_watch_requires_query_or_tmdb_id(monkeypatch):
     from fastapi.testclient import TestClient
 

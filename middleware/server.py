@@ -90,8 +90,11 @@ class WatchRequest(BaseModel):
     episode: int | None = None
 
 
-def _proxy_url(sid: str, media_url: str, name: str = "") -> str:
-    return "/stream?" + urlencode({"sid": sid, "url": media_url})
+def _proxy_url(sid: str, media_url: str, name: str = "", ref: str = "") -> str:
+    q = {"sid": sid, "url": media_url}
+    if ref:
+        q["ref"] = ref
+    return "/stream?" + urlencode(q)
 
 
 def _scrape_site(name: str, query: str) -> list[dict]:
@@ -467,7 +470,7 @@ async def watch(req: WatchRequest, request: Request) -> dict:
             "name": sv.get("name"),
             "original_name": sv.get("original_name"),
             "kind": res["kind"],
-            "proxy_url": base + _proxy_url(res["sid"], res["url"]),
+            "proxy_url": base + _proxy_url(res["sid"], res["url"], ref=sv.get("url") or ""),
         })
 
     imdb_id, subtitles_list = await _add_foreign_servers(req, base, servers)
@@ -726,11 +729,21 @@ async def direct(req: WatchRequest) -> dict:
 
 
 @app.get("/stream")
-async def stream(sid: str = Query(...), url: str = Query(...), request: Request = None) -> Response:
+async def stream(sid: str = Query(...), url: str = Query(...), ref: str = "", request: Request = None) -> Response:
     status, content_type, body = None, "", b""
     mgr = get_manager()
     browser_session = mgr.sessions.get(sid) if mgr is not None else None
     http_ep = http_sessions.get(sid)
+
+    # Session gone (e.g. server restart): re-resolve the embed from `ref` and
+    # mint a fresh session under the same sid so previously copied links keep
+    # working without re-scraping the whole site.
+    if http_ep is None and not (browser_session is not None and browser_session.active) and ref:
+        re_got = await asyncio.to_thread(resolve_http, ref, None)
+        if re_got:
+            http_sessions[sid] = {"url": re_got["url"], "referer": ref, "created": time.monotonic()}
+            http_ep = http_sessions[sid]
+            url = re_got["url"]
 
     if browser_session is not None and browser_session.active:
         got = await mgr.fetch(sid, url)
