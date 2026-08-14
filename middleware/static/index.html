@@ -91,8 +91,22 @@ $("frm").addEventListener("submit", async (ev) => {
   if (!raw) return;
   const checked = Array.from(document.querySelectorAll("#sites input:checked")).map(c => c.value);
   const body = { type: $("type").value, sites: checked };
-  if (/^\d+$/.test(raw)) body.tmdb_id = parseInt(raw, 10);
-  else body.query = raw;
+  if (/^\d+$/.test(raw)) {
+    body.tmdb_id = parseInt(raw, 10);
+  } else {
+    // Resolve the title to a TMDB id so foreign providers (vidsrc/primetv) run too.
+    try {
+      const want = $("type").value;
+      const sr = await fetch("/tmdb/search?q=" + encodeURIComponent(raw) + "&page=1");
+      const sj = await sr.json();
+      const items = sj.items || [];
+      const hit = items.find(it => it.media_type === want) || items[0];
+      if (hit && hit.tmdb_id) body.tmdb_id = hit.tmdb_id;
+      else body.query = raw;
+    } catch (e) {
+      body.query = raw;
+    }
+  }
 
   const go = $("go");
   go.disabled = true;
