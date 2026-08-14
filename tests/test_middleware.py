@@ -232,7 +232,10 @@ def test_stream_self_heals_when_session_missing(monkeypatch):
 
     from middleware import server
 
+    seen = {}
+
     def fake_resolve_http(embed_url, referer=None):
+        seen["args"] = (embed_url, referer)
         return {"kind": "hls", "url": "https://cdn.test/p/fresh.m3u8", "referer": embed_url}
 
     def fake_http_fetch(sid, url):
@@ -249,10 +252,13 @@ def test_stream_self_heals_when_session_missing(monkeypatch):
                 "sid": "missing-sid",
                 "url": "https://cdn.test/p/old.m3u8",
                 "ref": "https://embed.test/e/1",
+                "site_ref": "https://tv10.egydead.live/movie/x",
             },
         )
         assert r.status_code == 200
         assert "seg-1.ts" in r.text
+        # the embed host serves its full page only to the site referer
+        assert seen["args"] == ("https://embed.test/e/1", "https://tv10.egydead.live/movie/x")
         assert server.http_sessions.get("missing-sid", {}).get("url") == "https://cdn.test/p/fresh.m3u8"
     finally:
         server.http_sessions.pop("missing-sid", None)
