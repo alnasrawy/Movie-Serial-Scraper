@@ -418,3 +418,152 @@ def test_tmdb_search_multi_carries_media_type(monkeypatch):
     items = r.json()["items"]
     assert [i["media_type"] for i in items] == ["movie", "tv"]
     assert items[1]["poster"].startswith("https://image.tmdb.org/t/p/w500")
+
+
+def test_rewrite_mpd_wraps_baseurl_and_templates():
+    from middleware.server import _rewrite_mpd
+
+    mpd = (
+        '<MPD>\n'
+        '  <BaseURL>segments/</BaseURL>\n'
+        '  <SegmentTemplate media="v$Number$.m4s" initialization="init.mp4"/>\n'
+        '  <BaseURL>https://other.test/x/</BaseURL>\n'
+        '</MPD>\n'
+    )
+    out = _rewrite_mpd(mpd, "https://cdn.test/dash/idx/index_web.mpd", "s")
+    assert "<BaseURL>/stream?sid=s&url=https%3A%2F%2Fcdn.test%2Fdash%2Fidx%2Fsegments%2F</BaseURL>" in out
+    assert 'media="/stream?sid=s&url=https%3A%2F%2Fcdn.test%2Fdash%2Fidx%2Fv$Number$.m4s"' in out
+    assert 'initialization="/stream?sid=s&url=https%3A%2F%2Fcdn.test%2Fdash%2Fidx%2Finit.mp4"' in out
+    assert "https%3A%2F%2Fother.test%2Fx%2F" in out
+    assert out.startswith("<MPD>")
+    assert "$Number$" in out  # template vars preserved for the player to fill
+
+
+def test_rewrite_mpd_keeps_printf_template_tokens_literal():
+    """Engine DASH templates use $Number%05d$ — the % and $ must stay literal."""
+    from middleware.server import _rewrite_mpd
+
+    mpd = (
+        '<MPD>\n'
+        '  <SegmentTemplate media="chunk-stream$RepresentationID$-$Number%05d$.m4s" '
+        'initialization="init-stream$RepresentationID$.m4s"/>\n'
+        "</MPD>\n"
+    )
+    out = _rewrite_mpd(mpd, "https://cdn.test/dash/idx/index_web.mpd", "s")
+    assert 'media="/stream?sid=s&url=https%3A%2F%2Fcdn.test%2Fdash%2Fidx%2Fchunk-stream$RepresentationID$-$Number%05d$.m4s"' in out
+    assert 'initialization="/stream?sid=s&url=https%3A%2F%2Fcdn.test%2Fdash%2Fidx%2Finit-stream$RepresentationID$.m4s"' in out
+    assert "%25" not in out  # no double-encoded %
+
+
+def test_http_headers_includes_cookie_and_ua():
+    from middleware.server import _http_headers
+
+    ep = {
+        "referer": "https://embed.test/e/1",
+        "cookie": "CloudFront-Policy=eyJZ;CloudFront-Signature=abc;",
+        "user_agent": "TestUA/1.0",
+    }
+    headers = _http_headers(ep, "https://cdn.test/x")
+    assert headers["Cookie"] == ep["cookie"]
+    assert headers["User-Agent"] == "TestUA/1.0"
+    assert headers["Referer"] == "https://embed.test/e/1"
+
+
+def test_stream_rewrites_dash_manifest(monkeypatch):
+    """A DASH manifest fetched through the proxy gets segment URLs rewritten."""
+    from fastapi.testclient import TestClient
+
+    from middleware import server
+
+    session = SimpleNamespace(active=True, new_url="")
+
+    async def fake_fetch(sid: str, url: str):
+        if url.endswith(".mpd"):
+            mpd = (
+                "<MPD>\n"
+                '  <SegmentTemplate media="v$Number$.m4s" initialization="init.mp4"/>\n'
+                "</MPD>\n"
+            )
+            return 200, "application/dash+xml", mpd.encode("utf-8")
+        return 200, "video/mp2t", b"x"
+
+    mgr = server.get_manager()
+    monkeypatch.setitem(mgr.sessions, "dash-sid", session)
+    monkeypatch.setattr(mgr, "fetch", fake_fetch)
+    c = TestClient(server.app)
+    r = c.get("/stream", params={"sid": "dash-sid", "url": "https://cdn.test/dash/idx/index_web.mpd"})
+    assert r.status_code == 200
+    assert r.headers["content-type"].startswith("application/dash+xml")
+    assert 'media="/stream?sid=dash-sid&url=' in r.text
+    assert "v$Number$.m4s" in r.text
+
+
+def test_watch_adds_primetv_foreign_servers(monkeypatch):
+    """/watch resolves primetv engine/easyplex streams and proxies them."""
+    from fastapi.testclient import TestClient
+
+    from middleware import primetv
+    from middleware import server
+    from middleware import vidsrc
+
+    def fake_tmdb_title(tmdb_id, key=None, media_type="movie"):
+        return {
+            "tmdb_id": str(tmdb_id),
+            "media_type": "movie",
+            "title": "استهلال",
+            "original_title": "Inception",
+            "overview": "",
+            "year": 2010,
+        }
+
+    def fake_scrape_all(query, sites):
+        return []
+
+    async def fake_resolve_embed(url, referer=None):
+        return {"sid": f"sid-{hash(url)}", "kind": "hls", "url": "https://cdn.test/master.m3u8"}
+
+    class _Res:
+        servers = [
+            {
+                "url": "https://sacdn.hakunaymatata.com/dash/6207982430134357800_1_1_1080/index_web.mpd",
+                "kind": "dash",
+                "quality": 1080,
+                "cookie": "CloudFront-Policy=eyJZ;",
+                "referer": "https://primeott.sytes.net/engine/",
+                "user_agent": "",
+            }
+        ]
+
+    captured = {}
+
+    def fake_resolve(tmdb_id, kind, title="", year=None, season=None, episode=None):
+        captured["args"] = (tmdb_id, kind, title, year)
+        return _Res()
+
+    monkeypatch.setenv("TMDB_API_KEY", "test-key")
+    monkeypatch.setattr("scraper.tmdb.tmdb_title", fake_tmdb_title)
+    monkeypatch.setattr(server, "_scrape_all", fake_scrape_all)
+    monkeypatch.setattr(server, "_resolve_embed", fake_resolve_embed)
+    monkeypatch.setattr(primetv, "is_enabled", lambda: True)
+    monkeypatch.setattr(primetv, "resolve", fake_resolve)
+    monkeypatch.setattr(primetv, "_cfg", lambda: {"label": "سيرفر برايم"})
+    monkeypatch.setattr(vidsrc, "is_enabled", lambda: False)
+
+    server.http_sessions.clear()
+    server._watch_cache.clear()
+    try:
+        c = TestClient(server.app)
+        r = c.post("/watch", json={"tmdb_id": 27205, "type": "movie"})
+        assert r.status_code == 200
+        data = r.json()
+        pt = [s for s in data["servers"] if s["site"] == "primetv"]
+        assert len(pt) == 1
+        assert pt[0]["name"] == "سيرفر برايم 1"
+        assert pt[0]["kind"] == "dash"
+        assert pt[0]["proxy_url"].startswith("http://testserver/stream?sid=")
+        sessions = [ep for ep in server.http_sessions.values() if ep.get("kind") == "primetv"]
+        assert len(sessions) == 1
+        assert sessions[0]["cookie"] == "CloudFront-Policy=eyJZ;"
+        assert captured["args"] == (27205, "movie", "Inception", 2010)
+    finally:
+        server.http_sessions.clear()

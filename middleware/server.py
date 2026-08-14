@@ -226,6 +226,68 @@ def _rewrite_m3u8(text: str, base_url: str, sid: str) -> str:
     return "\n".join(out_lines)
 
 
+_MPD_ATTR_RE = re.compile(r'\b(?:media|initialization)="([^"]+)"')
+
+
+def _rewrite_mpd(text: str, base_url: str, sid: str) -> str:
+    """Rewrite a DASH manifest so segments go through our proxy.
+
+    Relative <BaseURL> entries and SegmentTemplate `media`/`initialization`
+    attribute values are resolved against the MPD URL. The session's cookie
+    (e.g. CloudFront signed cookies) is attached server-side on each fetch.
+    `$Name$` template tokens stay unencoded so the player can substitute them.
+    """
+
+    def wrap(uri: str) -> str:
+        # $Name$ template tokens (may include printf specifiers like %05d) must
+        # stay literal so the player can substitute them; stash them before
+        # urlencoding and restore afterwards.
+        tokens: list[str] = []
+
+        def stash(m: re.Match) -> str:
+            tokens.append(m.group(0))
+            return "\x01{0}\x01".format(len(tokens) - 1)
+
+        protected = re.sub(r"\$[A-Za-z0-9_%.:-]*\$", stash, uri)
+        wrapped = _proxy_url(sid, urljoin(base_url, protected))
+        for i, tok in enumerate(tokens):
+            wrapped = wrapped.replace("%01{0}%01".format(i), tok)
+        return wrapped
+
+    def repl_attr(m: re.Match) -> str:
+        value = m.group(1).strip()
+        if not value or value.startswith(("http://", "https://", "$")):
+            return m.group(0)
+        return '{}="{}"'.format(m.group(0).split("=", 1)[0].rstrip(), wrap(value))
+
+    def repl_base(m: re.Match) -> str:
+        value = m.group(1).strip()
+        if not value:
+            return m.group(0)
+        return "<BaseURL>{}</BaseURL>".format(wrap(value))
+
+    out_lines = []
+    for line in text.splitlines():
+        line = re.sub(r"<BaseURL>([^<]*)</BaseURL>", repl_base, line)
+        line = _MPD_ATTR_RE.sub(repl_attr, line)
+        out_lines.append(line)
+    return "\n".join(out_lines)
+
+
+def _http_headers(ep: dict, url: str) -> dict:
+    """Request headers for an HTTP-resolved session (referer + optional cookie/UA)."""
+    headers = {
+        "User-Agent": ep.get("user_agent")
+        or "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+        "(KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36",
+        "Referer": ep["referer"],
+    }
+    cookie = ep.get("cookie")
+    if cookie:
+        headers["Cookie"] = cookie
+    return headers
+
+
 def _http_fetch(sid: str, url: str) -> tuple[int, str, bytes] | None:
     """Plain-requests fetch for HTTP-resolved sessions (no browser)."""
     import requests
@@ -234,17 +296,7 @@ def _http_fetch(sid: str, url: str) -> tuple[int, str, bytes] | None:
     if not ep:
         return None
     try:
-        resp = requests.get(
-            url,
-            headers={
-                "User-Agent": (
-                    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
-                    "(KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36"
-                ),
-                "Referer": ep["referer"],
-            },
-            timeout=30,
-        )
+        resp = requests.get(url, headers=_http_headers(ep, url), timeout=30)
         return resp.status_code, resp.headers.get("content-type", ""), resp.content
     except requests.RequestException as exc:
         log.debug("http-proxy fetch failed for %s: %s", url, exc)
@@ -363,14 +415,45 @@ def _prune_sessions(max_age: float = 86400.0) -> None:
         http_sessions.pop(sid, None)
 
 
+async def _refresh_primetv(http_ep: dict) -> tuple[str, bool]:
+    """Re-resolve a primetv session's stream and return a fresh URL."""
+    from . import primetv
+
+    provider = http_ep.get("provider") or {}
+    idx = int(http_ep.get("idx") or 0)
+    try:
+        res = await asyncio.to_thread(
+            primetv.resolve,
+            provider.get("tmdb_id"),
+            provider.get("type") or "movie",
+            title=provider.get("title") or "",
+            year=provider.get("year"),
+            season=provider.get("season"),
+            episode=provider.get("episode"),
+        )
+    except Exception as exc:
+        log.warning("primetv refresh failed: %s", exc)
+        return http_ep.get("url") or "", False
+    servers = res.servers
+    if idx >= len(servers):
+        return http_ep.get("url") or "", False
+    sv = servers[idx]
+    http_ep["url"] = sv["url"]
+    http_ep["referer"] = sv["referer"] or http_ep.get("referer", "")
+    if sv.get("cookie"):
+        http_ep["cookie"] = sv["cookie"]
+    return sv["url"], True
+
+
 async def _add_foreign_servers(req: WatchRequest, base: str, servers: list[dict]) -> tuple[str, list[dict]]:
-    """Resolve foreign (vidsrc) streams for a TMDB id and append proxied servers.
+    """Resolve foreign (vidsrc/primetv) streams for a TMDB id and append proxied servers.
 
     Returns (imdb_id, subtitle languages) — the former is needed by the app to
     fetch subtitles later via /subtitle.
     """
     if not req.tmdb_id:
         return "", []
+    from scraper.tmdb import api_key, tmdb_title
     from . import subtitles as subs
     from . import vidsrc
 
@@ -403,7 +486,61 @@ async def _add_foreign_servers(req: WatchRequest, base: str, servers: list[dict]
                 found = await asyncio.to_thread(subs.search, imdb_id)
                 sub_langs = subs.available_languages(found)
     except Exception as exc:
-        log.warning("foreign/subtitle providers failed (%s); Arabic servers unaffected", exc)
+        log.warning("vidsrc/subtitle providers failed (%s); other servers unaffected", exc)
+
+    try:
+        from . import primetv
+
+        if primetv.is_enabled():
+            key = api_key()
+            info = {}
+            if key:
+                try:
+                    info = await asyncio.to_thread(tmdb_title, req.tmdb_id, key=key, media_type=req.type)
+                except Exception as exc:
+                    log.warning("tmdb_title for primetv failed: %s", exc)
+            ptitle = (info.get("original_title") or info.get("title") or "").strip()
+            res = await asyncio.to_thread(
+                primetv.resolve,
+                req.tmdb_id,
+                req.type,
+                title=ptitle,
+                year=info.get("year"),
+                season=req.season,
+                episode=req.episode,
+            )
+            label = primetv._cfg().get("label", "سيرفر برايم")
+            provider_args = {
+                "tmdb_id": req.tmdb_id,
+                "type": req.type,
+                "title": ptitle,
+                "year": info.get("year"),
+                "season": req.season,
+                "episode": req.episode,
+            }
+            for i, sv in enumerate(res.servers, 1):
+                sid = _new_sid()
+                http_sessions[sid] = {
+                    "url": sv["url"],
+                    "referer": sv["referer"] or primetv._cfg().get("engine_base_url", ""),
+                    "cookie": sv["cookie"] or "",
+                    "user_agent": sv["user_agent"] or "",
+                    "kind": "primetv",
+                    "idx": i - 1,
+                    "provider": provider_args,
+                    "created": time.monotonic(),
+                }
+                servers.append({
+                    "site": "primetv",
+                    "name": "{} {}".format(label, i),
+                    "kind": sv["kind"],
+                    "quality": sv["quality"],
+                    "proxy_url": base + _proxy_url(sid, sv["url"]),
+                    "foreign": True,
+                })
+    except Exception as exc:
+        log.warning("primetv provider failed (%s); other servers unaffected", exc)
+
     return imdb_id, sub_langs
 
 
@@ -512,9 +649,14 @@ async def stream(sid: str = Query(...), url: str = Query(...)) -> Response:
         and 200 <= status < 400
         and ("mpegurl" in content_type or "m3u8" in content_type or url.lower().endswith(".m3u8"))
     )
+    is_manifest = bool(
+        status is not None
+        and 200 <= status < 400
+        and ("dash" in content_type or url.lower().endswith((".mpd", "/manifest")))
+    )
 
     # token died: refresh the session and retry once for playlists
-    if status is not None and status >= 400 and (url.lower().endswith((".m3u8", ".txt")) or "mpegurl" in content_type):
+    if status is not None and status >= 400 and (url.lower().endswith((".m3u8", ".mpd", ".txt")) or "mpegurl" in content_type or "dash" in content_type):
         new_url = url
         refreshed = False
         if browser_session is not None:
@@ -524,6 +666,7 @@ async def stream(sid: str = Query(...), url: str = Query(...)) -> Response:
             # HTTP sessions: re-resolve the embed and mint a fresh URL. For
             # vidsrc sessions the stream data is static — just re-mint the
             # host JWT and restamp the (token-less) master playlist URL.
+            from . import primetv
             from . import vidsrc
 
             if http_ep.get("kind") == "vidsrc":
@@ -531,6 +674,8 @@ async def stream(sid: str = Query(...), url: str = Query(...)) -> Response:
                     vidsrc.restamp_master, http_ep.get("base_url") or url, http_ep.get("host") or ""
                 )
                 refreshed = bool(new_url)
+            elif http_ep.get("kind") == "primetv":
+                new_url, refreshed = await _refresh_primetv(http_ep)
             else:
                 re_got = await asyncio.to_thread(resolve_http, http_ep["referer"], None)
                 if re_got:
@@ -545,6 +690,7 @@ async def stream(sid: str = Query(...), url: str = Query(...)) -> Response:
                 status, content_type, body = got
                 url = new_url
                 is_playlist = 200 <= status < 400 and "mpegurl" in content_type or url.lower().endswith(".m3u8")
+                is_manifest = 200 <= status < 400 and "dash" in content_type or url.lower().endswith((".mpd", "/manifest"))
 
     if status is None:
         return Response(status_code=503, content="session unavailable")
@@ -555,6 +701,10 @@ async def stream(sid: str = Query(...), url: str = Query(...)) -> Response:
     if is_playlist:
         rewritten = _rewrite_m3u8(body.decode("utf-8", "replace"), url, sid)
         return Response(content=rewritten, media_type="application/vnd.apple.mpegurl")
+
+    if is_manifest:
+        rewritten = _rewrite_mpd(body.decode("utf-8", "replace"), url, sid)
+        return Response(content=rewritten, media_type="application/dash+xml")
 
     stripped = _strip_png_wrapper(body)
     media_type = "video/mp2t" if stripped is not body else (content_type or "application/octet-stream")

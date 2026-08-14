@@ -11,6 +11,9 @@ output/
 *.log
 ai_context.md
 
+# Reverse-engineering artifacts (not part of the project)
+apk/
+
 # Secrets
 .env
 

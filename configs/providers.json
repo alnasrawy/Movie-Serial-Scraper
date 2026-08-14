@@ -9,6 +9,16 @@
     "label": "سيرفر أجنبي",
     "doh_url": "https://cloudflare-dns.com/dns-query"
   },
+  "primetv": {
+    "enabled": true,
+    "engine_base_url": "https://primeott.sytes.net/engine/",
+    "easyplex_base_url": "http://144.91.94.164:8007",
+    "timeout": 25,
+    "max_servers": 6,
+    "embed_attempts": 3,
+    "label": "سيرفر برايم",
+    "cache_ttl": 300
+  },
   "subtitles": {
     "opensubtitles": {
       "enabled": true,

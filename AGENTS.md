@@ -24,7 +24,7 @@ python cli.py --list
 python cli.py --query "inception" --sites "akwams,egydead" --watch-only
 python final_links.py "inception"            # one-shot: scrape + resolve + live HLS links
 python -m middleware                          # standalone FastAPI server (uvicorn :8000)
-python -m pytest tests -q                     # 68 tests, no network needed
+python -m pytest tests -q                     # 84 tests, no network needed
 ```
 
 ## Architecture
@@ -39,7 +39,8 @@ scraper/
   resolver.py       -> best-effort direct-URL extraction (regex + Dean Edwards packer)
   verify.py         -> live link checks + numbering labels (سيرفر 1, ...)
   storage.py        -> JSON / CSV export
-  tmdb.py           -> TMDB id -> Arabic search title (needs 32-char v3 API key)
+  tmdb.py           -> TMDB id -> Arabic search title + original_title + year
+                       (needs 32-char v3 API key)
 middleware/
   http_resolver.py  -> PURE-HTTP resolver (no browser): GET embed -> unpack_packer
                        -> .urlset/master.txt -> HLS with Referer. Cheap/fast path.
@@ -57,14 +58,25 @@ middleware/
                        -> download .gz -> decode (cp1256/utf-8) -> srt->vtt.
                        Search is cached 30 min; /subtitle does a targeted
                        `sublanguageid-<lang>` search if the language is missing.
+  primetv.py        -> foreign provider (PrimeTV engine + easyplex) with NO
+                       browser: GET engine.php?action=play&tmdb=..&type=movie|tv
+                       [&title=&year=&se=&ep=] -> signed CDN URLs (may be DASH
+                       .mpd + CloudFront signed cookie, bound to OUR IP -> play
+                       through /stream). Second source: easyplex JSON API
+                       {easyplex_base}/sources/movie|tv?tmdb_id=..&title=.. ->
+                       videos (resolved:true = direct mp4/hls, else embed pages
+                       whose HTML is scanned with the app's EmbedLinkExtractor
+                       regexes). Resolve cached `cache_ttl` seconds.
   player.py         -> BrowserManager: long-lived Chromium, per-embed sessions,
                        ctx.request fetch (shares cookies, avoids headless TLS headers),
                        fetch() replays the embed Referer, refresh_session() mints new tokens
   server.py         -> FastAPI app: POST /watch (TMDB id -> ready server list, the
                        main-app contract), POST /direct (raw CDN m3u8 URLs, no
-                       proxy/session), POST /resolve, GET /stream (rewrites m3u8,
-                       strips PNG-wrapped TS, auto-refresh on 401/403), GET /subtitle
-                       (imdb_id + lang -> WebVTT), /health, GET / (in-browser tester
+                       proxy/session), POST /resolve, GET /stream (rewrites m3u8
+                       AND DASH MPDs, forwards the session Cookie header, strips
+                       PNG-wrapped TS, auto-refresh on 401/403 including a primetv
+                       re-resolve), GET /subtitle (imdb_id + lang -> WebVTT),
+                       /health, GET / (in-browser tester
                        page, middleware/static/index.html), and the TMDB browse
                        endpoints the Android app uses: GET /tmdb/popular?type=movie|tv,
                        GET /tmdb/trending?time=week|day, GET /tmdb/search?q=...
@@ -139,6 +151,26 @@ tests/              -> 68 tests. conftest.py sets PROJECT_ROOT on sys.path and s
     then fall back to plain requests. `search(imdb_id, lang=...)` appends
     `sublanguageid-<lang>` — `/subtitle` uses it when a language (e.g. `ara`)
     is missing from the default result window.
+- **PrimeTV provider (`primetv.py`) facts:**
+  - Engine stream `format` labels are unreliable (`.mp4` URLs sometimes labeled
+    `DASH`) — detect media kind from the URL extension in `_kind_for`
+    (`.m3u8`->hls, `.mpd`/`/manifest`->dash, else mp4).
+  - The engine's DASH TV streams come with a **CloudFront signed cookie** bound
+    to the requesting (OUR) IP. `/stream` must forward that `Cookie` on the MPD
+    AND every segment — the session stores it and `_http_headers` adds it.
+  - The engine MPD uses printf-style templates: `media="chunk-stream$RepresentationID$-$Number%05d$.m4s"`.
+    `_rewrite_mpd` stashes `$...$` tokens before urlencoding and restores them
+    so the player can still substitute `$Number$`/`$RepresentationID$` (a naive
+    urlencode turns `$` into `%24` and `%` into `%25`, silently breaking DASH
+    playback). Regression-tested in tests/test_middleware.py.
+  - The engine MPD is served with content-type `application/octet-stream` —
+    `/stream` detects DASH by the `.mpd`/`/manifest` URL suffix, not the header.
+  - Engine bcdn/easyplex media URLs carry expiring `sign`/`t` query tokens:
+    `/watch` sessions store the resolve args and `/stream` re-runs
+    `primetv.resolve` on 401/403 via `_refresh_primetv`. Do not cache resolved
+    URLs longer than `cache_ttl` (default 300s).
+  - Engine/easyplex are **third-party services** — the endpoints may change or
+    rate-limit; the provider fails soft (skips to the next server/site).
 
 ## Conventions
 

@@ -44,12 +44,15 @@ def tmdb_title(
     data = resp.json()
     title = data.get("title") or data.get("name") or data.get("original_title") or ""
     original = data.get("original_title") or data.get("original_name") or title
+    date = data.get("release_date") or data.get("first_air_date") or ""
+    year = int(str(date)[:4]) if str(date)[:4].isdigit() else None
     return {
         "tmdb_id": str(tmdb_id),
         "media_type": kind,
         "title": title,
         "original_title": original,
         "overview": data.get("overview") or "",
+        "year": year,
     }
 
 
