@@ -229,3 +229,120 @@ def test_is_enabled_defaults():
     from middleware.primetv import is_enabled
 
     assert is_enabled() is True
+
+
+def test_is_playable_media_accepts_media_only():
+    from middleware.primetv import _is_playable_media
+
+    assert _is_playable_media("https://cdn.x.com/hls2/01/00001/x_y/master.m3u8?t=1")
+    assert _is_playable_media("https://bcdn.hakunaymatata.com/resource/a.mp4?sign=1")
+    assert _is_playable_media("https://sacdn.hakunaymatata.com/dash/a/index_web.mpd")
+    assert _is_playable_media("https://cdn.x.com/urlset/master.txt")
+    # embed pages are HTML, not media — these show up as broken "mp4" in VLC
+    assert not _is_playable_media("https://mp4plus.org/embed-57fzdih46d01.html")
+    assert not _is_playable_media("https://embed.test/e/abc")
+    assert not _is_playable_media("https://cdn.x.com/thumb/poster.jpg")
+
+
+def test_verify_live_accepts_2xx(monkeypatch):
+    from middleware import primetv
+
+    class _Resp:
+        status_code = 206
+
+        def close(self):
+            pass
+
+    class _FakeHttp:
+        def get(self, *a, **kw):
+            return _Resp()
+
+    monkeypatch.setattr(primetv, "_http", _FakeHttp())
+    monkeypatch.setattr(primetv, "_fallback_http", _FakeHttp())
+    assert primetv._verify_live("https://cdn.x.com/movie.mp4") is True
+
+
+def test_verify_live_rejects_429_and_errors(monkeypatch):
+    from middleware import primetv
+
+    class _Resp429:
+        status_code = 429
+
+        def close(self):
+            pass
+
+    class _FakeHttp:
+        def __init__(self, status):
+            self._status = status
+
+        def get(self, *a, **kw):
+            if self._status == 0:
+                raise RuntimeError("timeout")
+            return _Resp429()
+
+    monkeypatch.setattr(primetv, "_http", _FakeHttp(429))
+    monkeypatch.setattr(primetv, "_fallback_http", _FakeHttp(429))
+    assert primetv._verify_live("https://bcdn.x.com/a.mp4") is False
+
+    monkeypatch.setattr(primetv, "_http", _FakeHttp(0))
+    monkeypatch.setattr(primetv, "_fallback_http", _FakeHttp(0))
+    assert primetv._verify_live("https://bcdn.x.com/a.mp4") is False
+
+
+def test_resolve_drops_embed_pages(monkeypatch):
+    """resolved:True entries pointing at HTML embed pages must not be listed."""
+    from middleware import primetv
+
+    class _FakeResp:
+        status_code = 200
+        text = ""
+
+        def json(self):
+            return {
+                "success": True,
+                "provider": "easyplex",
+                "videos": [
+                    {
+                        "server": "VIP Fast",
+                        "link": "https://mp4plus.org/embed-57fzdih46d01.html",
+                        "header": "https://mp4plus.org/",
+                        "useragent": "Mozilla/5.0",
+                        "hd": 1,
+                        "hls": 0,
+                        "resolved": True,
+                    }
+                ],
+            }
+
+    class _Router:
+        def __call__(self, url, referer=None, timeout=25, headers=None, **kw):
+            return _FakeResp()
+
+    monkeypatch.setattr(primetv, "_get", _Router())
+    monkeypatch.setattr(primetv, "_primetv_cache", {})
+    monkeypatch.setattr(primetv, "_cfg", lambda: dict(primetv._DEFAULT_CONFIG["primetv"]))
+
+    res = primetv.resolve(27205, "movie", title="Inception", year=2010)
+    assert res.servers == []
+    assert not any("mp4plus" in s["url"] for s in res.servers)
+
+
+def test_resolve_verify_live_filters_dead_servers(monkeypatch):
+    from middleware import primetv
+
+    router = _Router()
+    monkeypatch.setattr(primetv, "_get", router)
+    monkeypatch.setattr(primetv, "_primetv_cache", {})
+    cfg = dict(primetv._DEFAULT_CONFIG["primetv"])
+    cfg["verify_live"] = True
+    monkeypatch.setattr(primetv, "_cfg", lambda: cfg)
+
+    def fake_verify(url, referer="", cookie="", user_agent="", timeout=8.0):
+        return "shahidtv" not in url and "mp4plus" not in url
+
+    monkeypatch.setattr(primetv, "_verify_live", fake_verify)
+
+    res = primetv.resolve(27205, "movie", title="Inception", year=2010)
+    urls = [s["url"] for s in res.servers]
+    assert urls  # engine + easyplex direct + resolved embed survive
+    assert not any("shahidtv" in u for u in urls)

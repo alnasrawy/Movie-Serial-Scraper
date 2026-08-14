@@ -321,8 +321,15 @@ async def watch(req: WatchRequest, request: Request) -> dict:
     Body: {"tmdb_id": 27205, "type": "movie", "sites": ["akwams", "egydead"]}
     Returns: {"tmdb_id", "type", "query", "imdb_id", "subtitles",
               "servers": [{name, site, kind, proxy_url}]}
+
+    Source selection: an explicit `sites` list is used as-is. Movies default to
+    our own Arabic sites (akwams, egydead) so the app's list is our engine;
+    TV defaults to foreign providers only (fast — the Arabic sites index a
+    series by iterating every episode).
     """
     sites = [s.strip() for s in (req.sites or []) if s.strip()]
+    if not sites and req.type == "movie":
+        sites = ["akwams", "egydead"]
     if not sites and not req.tmdb_id:
         raise HTTPException(400, "Provide 'sites' or 'tmdb_id'")
 
@@ -621,6 +628,8 @@ async def direct(req: WatchRequest) -> dict:
     token-signed for ~36h and do not need a Referer header).
     """
     sites = tuple(s.strip() for s in (req.sites or []) if s.strip())
+    if not sites and req.type == "movie":
+        sites = ("akwams", "egydead")
     if not sites and not req.tmdb_id:
         raise HTTPException(400, "Provide 'sites' or 'tmdb_id'")
     req.sites = list(sites)

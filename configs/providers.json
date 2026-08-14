@@ -17,7 +17,9 @@
     "max_servers": 6,
     "embed_attempts": 3,
     "label": "سيرفر برايم",
-    "cache_ttl": 300
+    "cache_ttl": 300,
+    "verify_live": true,
+    "verify_timeout": 8
   },
   "subtitles": {
     "opensubtitles": {

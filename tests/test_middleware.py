@@ -569,17 +569,17 @@ def test_watch_adds_primetv_foreign_servers(monkeypatch):
         server.http_sessions.clear()
 
 
-def test_watch_without_sites_skips_arabic_scrape(monkeypatch):
-    """With no sites selected, /watch runs only foreign providers (primetv)."""
+def test_watch_movie_defaults_to_our_arabic_sites(monkeypatch):
+    """A movie with no `sites` scrapes our own Arabic sites (akwams, egydead)."""
     from fastapi.testclient import TestClient
 
     from middleware import server
     from middleware import primetv, subtitles, vidsrc
 
-    calls = {"scrape": 0}
+    calls = {"sites": None}
 
     def fake_scrape_all(query, sites):
-        calls["scrape"] += 1
+        calls["sites"] = list(sites)
         return []
 
     async def fake_resolve_embed(url, referer=None):
@@ -615,12 +615,12 @@ def test_watch_without_sites_skips_arabic_scrape(monkeypatch):
         c = TestClient(server.app)
         r = c.post("/watch", json={"tmdb_id": 27205, "type": "movie"})
         assert r.status_code == 200
-        data = r.json()
-        assert calls["scrape"] == 0
-        assert all(s["site"] == "primetv" for s in data["servers"])
-        assert not any(s["site"] in ("akwams", "egydead") for s in data["servers"])
+        # our own Arabic engine runs by default for movies
+        assert calls["sites"] == ["akwams", "egydead"]
 
-        r2 = c.post("/watch", json={"query": "inception"})
-        assert r2.status_code == 400
+        # TV keeps the fast path: no Arabic scrape unless sites are explicit
+        r3 = c.post("/watch", json={"tmdb_id": 1396, "type": "tv", "season": 1, "episode": 1})
+        assert r3.status_code == 200
+        assert calls["sites"] == ["akwams", "egydead"]  # unchanged -> no tv scrape
     finally:
         server.http_sessions.clear()

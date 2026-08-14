@@ -41,6 +41,7 @@ Neither source needs a browser or JavaScript execution. Config is in
 
 from __future__ import annotations
 
+import concurrent.futures
 import json
 import logging
 import os
@@ -71,6 +72,8 @@ _DEFAULT_CONFIG = {
         "embed_attempts": 3,
         "label": "سيرفر برايم",
         "cache_ttl": 300,
+        "verify_live": False,
+        "verify_timeout": 8,
     }
 }
 
@@ -148,6 +151,19 @@ def is_direct_video_url(value: str) -> bool:
         if junk in low:
             return False
     return True
+
+
+def _is_playable_media(url: str) -> bool:
+    """A URL a player (VLC/ExoPlayer) can open directly.
+
+    Accepts direct .m3u8/.mp4/.mpd URLs plus EarnVids-family playlists served
+    as master.txt. Drops embed pages (e.g. mp4plus.org/embed-*.html) which are
+    HTML, not media — those make the server list show links that fail in VLC.
+    """
+    if is_direct_video_url(url):
+        return True
+    low = url.lower()
+    return (".txt" in low) and ("master" in low or "urlset" in low)
 
 
 def _unescape(html: str) -> str:
@@ -272,6 +288,36 @@ def _get(url: str, referer: str | None, timeout: float, headers: dict | None = N
         except Exception:
             pass
     return _fallback_http.get(url, headers=hdrs, timeout=timeout, **kw)
+
+
+def _verify_live(
+    url: str,
+    referer: str = "",
+    cookie: str = "",
+    user_agent: str = "",
+    timeout: float = 8.0,
+) -> bool:
+    """Quick probe that a direct media URL currently serves content.
+
+    Uses an aborted ranged GET so mp4/mpd checks don't download the whole file;
+    playlists (m3u8) are small. Returns False on 429/403/502/404/timeouts so
+    /watch only lists servers that actually play right now.
+    """
+    hdrs = {"User-Agent": user_agent or UA, "Accept": "*/*", "Range": "bytes=0-2047"}
+    if referer:
+        hdrs["Referer"] = referer
+    if cookie:
+        hdrs["Cookie"] = cookie
+    try:
+        if _IMPERSONATE:
+            resp = _http.get(url, impersonate=_IMPERSONATE, headers=hdrs, stream=True, timeout=timeout)
+        else:
+            resp = _fallback_http.get(url, headers=hdrs, stream=True, timeout=timeout)
+        status = resp.status_code
+        resp.close()
+        return status in (200, 206)
+    except Exception:
+        return False
 
 
 def fetch_engine(
@@ -450,6 +496,27 @@ def resolve(
         if sv["url"] not in seen:
             seen.add(sv["url"])
             deduped.append(sv)
+
+    # Only keep URLs a player can open directly — drop embed pages (HTML) that
+    # would surface as broken "mp4" servers in VLC/ExoPlayer.
+    deduped = [sv for sv in deduped if _is_playable_media(sv["url"])]
+
+    if cfg.get("verify_live", False) and deduped:
+        verify_timeout = min(float(cfg.get("verify_timeout", 8)), timeout)
+        with concurrent.futures.ThreadPoolExecutor(max_workers=min(6, len(deduped))) as pool:
+            futures = [
+                pool.submit(
+                    _verify_live,
+                    sv["url"],
+                    sv.get("referer") or "",
+                    sv.get("cookie") or "",
+                    sv.get("user_agent") or "",
+                    verify_timeout,
+                )
+                for sv in deduped
+            ]
+            alive = [bool(fut.result()) for fut in futures]
+        deduped = [sv for sv, ok in zip(deduped, alive) if ok]
 
     max_servers = int(cfg.get("max_servers", 6))
     result.servers = deduped[:max_servers]
