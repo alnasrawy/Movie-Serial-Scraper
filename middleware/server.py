@@ -322,9 +322,9 @@ async def watch(req: WatchRequest, request: Request) -> dict:
     Returns: {"tmdb_id", "type", "query", "imdb_id", "subtitles",
               "servers": [{name, site, kind, proxy_url}]}
     """
-    sites = [s.strip() for s in (req.sites or ["akwams", "egydead"]) if s.strip()]
-    if not sites:
-        raise HTTPException(400, "No sites selected")
+    sites = [s.strip() for s in (req.sites or []) if s.strip()]
+    if not sites and not req.tmdb_id:
+        raise HTTPException(400, "Provide 'sites' or 'tmdb_id'")
 
     if req.query:
         query = req.query
@@ -365,12 +365,13 @@ async def watch(req: WatchRequest, request: Request) -> dict:
 
     merged_items: list[dict] = []
     seen: set[tuple] = set()
-    for cand in candidates:
-        for item in await asyncio.to_thread(_scrape_all, cand, sites):
-            key = (item.get("source"), item.get("detail_url") or item.get("id") or item.get("title"))
-            if key not in seen:
-                seen.add(key)
-                merged_items.append(item)
+    if sites:
+        for cand in candidates:
+            for item in await asyncio.to_thread(_scrape_all, cand, sites):
+                key = (item.get("source"), item.get("detail_url") or item.get("id") or item.get("title"))
+                if key not in seen:
+                    seen.add(key)
+                    merged_items.append(item)
 
     items = merged_items
     base = str(request.base_url).rstrip("/")
@@ -488,6 +489,15 @@ async def _add_foreign_servers(req: WatchRequest, base: str, servers: list[dict]
     except Exception as exc:
         log.warning("vidsrc/subtitle providers failed (%s); other servers unaffected", exc)
 
+    if not imdb_id and subs.is_enabled():
+        try:
+            imdb_id = await asyncio.to_thread(_tmdb_external_imdb, req.tmdb_id, req.type)
+            if imdb_id:
+                found = await asyncio.to_thread(subs.search, imdb_id)
+                sub_langs = subs.available_languages(found)
+        except Exception as exc:
+            log.warning("tmdb external_ids for subtitles failed: %s", exc)
+
     try:
         from . import primetv
 
@@ -573,7 +583,7 @@ def _direct_servers(req: WatchRequest) -> tuple[str, list[dict]]:
     items: list[dict] = []
     seen: set[tuple] = set()
     for cand in candidates:
-        for item in _scrape_all(cand, req.sites or ["akwams", "egydead"]):
+        for item in _scrape_all(cand, req.sites or []):
             key = (item.get("source"), item.get("detail_url") or item.get("id") or item.get("title"))
             if key not in seen:
                 seen.add(key)
@@ -610,9 +620,9 @@ async def direct(req: WatchRequest) -> dict:
     The URLs are playable directly in ExoPlayer/VLC (EarnVids hls2 links are
     token-signed for ~36h and do not need a Referer header).
     """
-    sites = tuple(s.strip() for s in (req.sites or ["akwams", "egydead"]) if s.strip())
-    if not sites:
-        raise HTTPException(400, "No sites selected")
+    sites = tuple(s.strip() for s in (req.sites or []) if s.strip())
+    if not sites and not req.tmdb_id:
+        raise HTTPException(400, "Provide 'sites' or 'tmdb_id'")
     req.sites = list(sites)
 
     cache_key = (req.query, req.tmdb_id, req.type, sites)
@@ -821,6 +831,16 @@ def _tmdb_fetch(path: str, params: dict) -> dict:
         "total_results": data.get("total_results"),
         "items": _tmdb_items(data),
     }
+
+
+def _tmdb_external_imdb(tmdb_id: int, media_type: str) -> str:
+    """IMDb id from TMDB external_ids (used for subtitles when vidsrc is off)."""
+    import requests as _requests
+
+    path = "/{}/{}/external_ids".format("tv" if media_type == "tv" else "movie", tmdb_id)
+    resp = _requests.get(_TMDB_API + path, params={"api_key": _tmdb_key()}, timeout=20)
+    resp.raise_for_status()
+    return resp.json().get("imdb_id") or ""
 
 
 @app.get("/tmdb/popular")

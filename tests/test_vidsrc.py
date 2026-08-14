@@ -126,12 +126,12 @@ def test_providers_config_file_shape():
     path = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "configs", "providers.json")
     cfg = _json.load(open(path, encoding="utf-8"))
     assert "vidsrc" in cfg
-    assert cfg["vidsrc"]["enabled"] is True
     assert cfg["vidsrc"]["embed_base"].startswith("https://")
+    assert cfg["primetv"]["enabled"] is True
     assert "subtitles" in cfg
 
 
 def test_is_enabled_defaults():
     from middleware.vidsrc import is_enabled
 
-    assert is_enabled() is True
+    assert is_enabled() is False

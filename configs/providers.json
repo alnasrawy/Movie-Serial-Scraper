@@ -1,6 +1,6 @@
 {
   "vidsrc": {
-    "enabled": true,
+    "enabled": false,
     "embed_base": "https://vidsrcme.ru",
     "referer": "https://vidsrcme.ru/",
     "player_referer": "https://cloudorchestranova.com/",

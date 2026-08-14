@@ -340,7 +340,7 @@ def test_watch_tries_multiple_query_candidates_and_merges(monkeypatch):
     monkeypatch.setattr(server, "_add_foreign_servers", fake_foreign)
 
     c = TestClient(server.app)
-    r = c.post("/watch", json={"tmdb_id": 27205, "type": "movie"})
+    r = c.post("/watch", json={"tmdb_id": 27205, "type": "movie", "sites": ["akwams"]})
     assert r.status_code == 200
     data = r.json()
     assert len(data["servers"]) == 1
@@ -565,5 +565,62 @@ def test_watch_adds_primetv_foreign_servers(monkeypatch):
         assert len(sessions) == 1
         assert sessions[0]["cookie"] == "CloudFront-Policy=eyJZ;"
         assert captured["args"] == (27205, "movie", "Inception", 2010)
+    finally:
+        server.http_sessions.clear()
+
+
+def test_watch_without_sites_skips_arabic_scrape(monkeypatch):
+    """With no sites selected, /watch runs only foreign providers (primetv)."""
+    from fastapi.testclient import TestClient
+
+    from middleware import server
+    from middleware import primetv, subtitles, vidsrc
+
+    calls = {"scrape": 0}
+
+    def fake_scrape_all(query, sites):
+        calls["scrape"] += 1
+        return []
+
+    async def fake_resolve_embed(url, referer=None):
+        return {"sid": "s", "kind": "hls", "url": "https://cdn.test/master.m3u8"}
+
+    class _Res:
+        servers = [
+            {"url": "https://cdn.test/master.m3u8", "kind": "hls", "quality": 720,
+             "cookie": "", "referer": "", "user_agent": ""}
+        ]
+
+    def fake_resolve(tmdb_id, kind, title="", year=None, season=None, episode=None):
+        return _Res()
+
+    def fake_tmdb_title(tmdb_id, key=None, media_type="movie"):
+        return {"tmdb_id": str(tmdb_id), "media_type": "movie", "title": "استهلال",
+                "original_title": "Inception", "overview": "", "year": 2010}
+
+    monkeypatch.setenv("TMDB_API_KEY", "test-key")
+    monkeypatch.setattr("scraper.tmdb.tmdb_title", fake_tmdb_title)
+    monkeypatch.setattr(server, "_scrape_all", fake_scrape_all)
+    monkeypatch.setattr(server, "_resolve_embed", fake_resolve_embed)
+    monkeypatch.setattr(primetv, "is_enabled", lambda: True)
+    monkeypatch.setattr(primetv, "resolve", fake_resolve)
+    monkeypatch.setattr(primetv, "_cfg", lambda: {"label": "سيرفر برايم"})
+    monkeypatch.setattr(vidsrc, "is_enabled", lambda: False)
+    monkeypatch.setattr(subtitles, "is_enabled", lambda: False)
+    monkeypatch.setattr(server, "_tmdb_external_imdb", lambda tmdb_id, media_type: "")
+
+    server.http_sessions.clear()
+    server._watch_cache.clear()
+    try:
+        c = TestClient(server.app)
+        r = c.post("/watch", json={"tmdb_id": 27205, "type": "movie"})
+        assert r.status_code == 200
+        data = r.json()
+        assert calls["scrape"] == 0
+        assert all(s["site"] == "primetv" for s in data["servers"])
+        assert not any(s["site"] in ("akwams", "egydead") for s in data["servers"])
+
+        r2 = c.post("/watch", json={"query": "inception"})
+        assert r2.status_code == 400
     finally:
         server.http_sessions.clear()

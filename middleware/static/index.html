@@ -57,10 +57,7 @@ video { width: 100%; background: #000; border-radius: 8px; max-height: 420px; }
           </select>
         </div>
       </div>
-      <div class="checkbox-row" id="sites">
-        <label><input type="checkbox" value="akwams" checked> akwams</label>
-        <label><input type="checkbox" value="egydead" checked> egydead</label>
-      </div>
+      <div class="note" style="color:#9aa4b2; font-size:13px; margin-top:12px">المصدر: برايم فقط (primetv)</div>
       <button type="submit" id="go">ابحث</button>
     </form>
     <div id="status"></div>
@@ -89,8 +86,7 @@ $("frm").addEventListener("submit", async (ev) => {
   ev.preventDefault();
   const raw = $("input").value.trim();
   if (!raw) return;
-  const checked = Array.from(document.querySelectorAll("#sites input:checked")).map(c => c.value);
-  const body = { type: $("type").value, sites: checked };
+  const body = { type: $("type").value };
   if (/^\d+$/.test(raw)) {
     body.tmdb_id = parseInt(raw, 10);
   } else {
