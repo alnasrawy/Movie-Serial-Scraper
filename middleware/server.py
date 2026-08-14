@@ -621,34 +621,27 @@ async def close_session(sid: str) -> dict:
 
 @app.get("/debug-subs")
 async def debug_subs(imdb_id: str = "1375666") -> dict:
-    """TEMP diagnostic: raw search result per HTTP stack (remove after diagnosis)."""
+    """TEMP diagnostic: raw search response from Render (remove after diagnosis)."""
+    import re as _re
+
     from . import subtitles as subs
 
-    out = {"curl_cffi": bool(getattr(subs, "_IMPERSONATE", None)), "steps": []}
+    out = {"curl_cffi": bool(getattr(subs, "_IMPERSONATE", None))}
+    imdb = _re.sub(r"^[tT]+", "", (imdb_id or "").strip())
     url = subs._cfg()["search_base"].format(imdb=imdb)
     headers = {
         "User-Agent": subs._ua(), "Accept": "application/json",
         "X-User-Agent": subs._cfg().get("x_user_agent") or "trailers.to-UA",
     }
-    for label, kw in (("impersonate", {}), ("doh", {"doh_url": "https://cloudflare-dns.com/dns-query"})):
-        try:
-            from curl_cffi import requests as cr
-            r = cr.get(url, impersonate="chrome131", headers=headers, timeout=20, **kw)
-            out["steps"].append({
-                "stack": label, "status": r.status_code,
-                "ct": r.headers.get("content-type", "")[:40], "len": len(r.content),
-            })
-        except Exception as exc:
-            out["steps"].append({"stack": label, "error": str(exc)[:120]})
     try:
-        import requests
-        r = requests.get(url, headers=headers, timeout=20)
-        out["steps"].append({
-            "stack": "requests", "status": r.status_code,
-            "ct": r.headers.get("content-type", "")[:40], "len": len(r.content),
-        })
+        from curl_cffi import requests as cr
+        r = cr.get(url, impersonate="chrome131", headers=headers, timeout=8)
+        out["status"] = r.status_code
+        out["ct"] = r.headers.get("content-type", "")[:50]
+        out["len"] = len(r.content)
+        out["head"] = r.text[:150]
     except Exception as exc:
-        out["steps"].append({"stack": "requests", "error": str(exc)[:120]})
+        out["error"] = str(exc)[:160]
     return out
 
 
