@@ -626,10 +626,15 @@ async def health() -> dict:
 
     mgr = get_manager()
     n_browser = len(mgr.sessions) if mgr is not None else 0
+    providers = {}
+    for name, mod in (("vidsrc", vidsrc), ("subtitles", subs)):
+        providers[name] = {
+            "enabled": mod.is_enabled(),
+            "curl_cffi": bool(getattr(mod, "_IMPERSONATE", None)),
+        }
     return {
         "ok": True,
         "sessions": n_browser + len(http_sessions),
         "cache_entries": len(_watch_cache),
-        "vidsrc_enabled": vidsrc.is_enabled(),
-        "subtitles_enabled": subs.is_enabled(),
+        "providers": providers,
     }
