@@ -218,6 +218,84 @@ def test_series_query_appends_arabic_episode_suffix():
     assert _series_query("House of the Dragon", 3, 2) == "House of the Dragon الموسم الثالث الحلقة 2"
 
 
+def test_resolve_vidaraa_uses_stream_api(monkeypatch):
+    """Vidaraa resolves by POSTing {filecode, device} to /api/stream."""
+    from middleware.http_resolver import resolve_http
+
+    class FakeResp:
+        status_code = 200
+
+        def json(self):
+            return {"streaming_url": "https://cdn.test/hls/jq7MjiG/master.m3u8?token=abc"}
+
+    calls = {}
+
+    class FakeSession:
+        headers = {}
+
+        def post(self, url, headers=None, json=None, timeout=None):
+            calls["url"] = url
+            calls["json"] = json
+            return FakeResp()
+
+    monkeypatch.setattr("middleware.http_resolver.requests.Session", FakeSession)
+    out = resolve_http("https://vidaraa.cc/e/38WkGGcygUjdy", referer="https://tv10.egydead.live/episode/x/")
+    assert out == {"url": "https://cdn.test/hls/jq7MjiG/master.m3u8?token=abc", "kind": "hls"}
+    assert calls["url"] == "https://vidaraa.cc/api/stream"
+    assert calls["json"] == {"filecode": "38WkGGcygUjdy", "device": "web"}
+
+
+def test_resolve_bysekoze_decrypts_gcm_payload(monkeypatch):
+    """Bysekoze's video API returns an AES-256-GCM payload whose key is the
+    two key_parts indexed by [version, 31-version]; the decrypted JSON holds
+    the HLS URL. Static decryption, no browser."""
+    import base64
+
+    from cryptography.hazmat.primitives.ciphers.aead import AESGCM
+
+    from middleware.http_resolver import resolve_http
+
+    version = 5
+    key = b"k" * 32  # AES-256 key assembled from two 16-byte parts
+    key_parts = ["z" * 24] * 30
+    key_parts[version - 1] = base64.b64encode(key[:16]).decode()
+    key_parts[31 - version - 1] = base64.b64encode(key[16:]).decode()
+    iv = b"123456789012"
+    payload = AESGCM(key).encrypt(iv, b'{"sources":[{"url":"https://cdn.test/hls2/x/master.m3u8?t=abc"}]}', None)
+
+    def b64url(b: bytes) -> str:
+        s = base64.b64encode(b).decode().replace("+", "-").replace("/", "_")
+        return s.rstrip("=")
+
+    class FakeResp:
+        status_code = 200
+
+        def json(self):
+            return {
+                "playback": {
+                    "version": version,
+                    "iv": b64url(iv),
+                    "payload": b64url(payload),
+                    "key_parts": key_parts,
+                }
+            }
+
+    calls = {}
+
+    class FakeSession:
+        headers = {}
+
+        def get(self, url, timeout=None):
+            calls["url"] = url
+            return FakeResp()
+
+    monkeypatch.setattr("middleware.http_resolver.requests.Session", FakeSession)
+    out = resolve_http("https://bysekoze.com/e/ewhuu60vxgsq")
+    assert calls["url"] == "https://bysekoze.com/api/videos/ewhuu60vxgsq/"
+    assert out and out["kind"] == "hls"
+    assert "master.m3u8" in out["url"]
+
+
 def test_match_se_filters_episode_pages():
     from middleware.server import _match_se
 

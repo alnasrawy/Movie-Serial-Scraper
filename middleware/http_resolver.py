@@ -65,6 +65,109 @@ def _candidates(text: str) -> list[str]:
     return out
 
 
+def _resolve_vidaraa(embed_url: str, referer: str | None = None) -> dict | None:
+    """Vidaraa embeds (``vidaraa.cc/e/<code>``): POST the SPA's stream API.
+
+    The embed page blocks foreign Referers (``akwams.org`` -> 403
+    "Embedding not allowed"), so a matching site referer is required —
+    exactly what the resolver gets from the host site's detail page. The
+    returned ``streaming_url`` carries an IP-bound token, so it must be
+    played through the /stream proxy (the caller always does).
+    """
+    try:
+        m = re.search(r"/e/([^/?#]+)", embed_url)
+        if not m:
+            return None
+        code = m.group(1)
+        base = "{}://{}".format(urlparse(embed_url).scheme, urlparse(embed_url).netloc)
+        sess = requests.Session()
+        sess.headers.update({"User-Agent": UA, "Accept-Language": "ar,en;q=0.9"})
+        refs = [referer, embed_url] if referer else [embed_url]
+        for ref in refs:
+            try:
+                r = sess.post(
+                    base + "/api/stream",
+                    headers={"Referer": ref, "Content-Type": "application/json"},
+                    json={"filecode": code, "device": "web"},
+                    timeout=_EMBED_TIMEOUT,
+                )
+            except requests.RequestException:
+                continue
+            if r.status_code >= 400:
+                continue
+            try:
+                data = r.json()
+            except ValueError:
+                continue
+            url = (data or {}).get("streaming_url")
+            if url:
+                kind = _kind_of(url)
+                if kind != "unknown":
+                    log.info("http-resolve OK (vidaraa): %s -> %s", embed_url, url[:120])
+                    return {"url": url, "kind": kind}
+        log.info("http-resolve no playable candidate for %s", embed_url)
+    except Exception:
+        log.exception("http-resolve vidaraa error for %s", embed_url)
+    return None
+
+
+def _resolve_bysekoze(embed_url: str) -> dict | None:
+    """Bysekoze embeds (``bysekoze.com/e/<code>``): fetch the SPA's video API.
+
+    The SPA (a React bundle) loads ``/api/videos/<code>/`` which returns an
+    AES-256-GCM encrypted payload split across many base64url ``key_parts``.
+    The key is assembled from the two parts indexed by ``[version, 31-version]``
+    (see the minified ``Ea`` in the bundle) — no browser needed. The decrypted
+    JSON holds the real HLS master URL.
+    """
+    try:
+        m = re.search(r"/e/([^/?#]+)", embed_url)
+        if not m:
+            return None
+        code = m.group(1)
+        base = "{}://{}".format(urlparse(embed_url).scheme, urlparse(embed_url).netloc)
+        sess = requests.Session()
+        sess.headers.update({"User-Agent": UA, "Accept-Language": "ar,en;q=0.9"})
+
+        r = sess.get("{}/api/videos/{}/".format(base, code), timeout=_EMBED_TIMEOUT)
+        if r.status_code >= 400:
+            log.info("http-resolve bysekoze api failed: %s -> %s", embed_url, r.status_code)
+            return None
+        data = r.json()
+        pb = data.get("playback") or {}
+        parts = pb.get("key_parts") or []
+        if not parts or not pb.get("payload"):
+            return None
+
+        def b64url(s: str) -> bytes:
+            s = s.replace("-", "+").replace("_", "/")
+            s += "=" * ((4 - len(s) % 4) % 4)
+            return __import__("base64").b64decode(s)
+
+        ver = int(pb.get("version") or 0)
+        idx = [ver, 31 - ver]
+        sel = [parts[i - 1] for i in idx if 1 <= i <= len(parts)]
+        key = b"".join(b64url(p) for p in sel)
+        iv = b64url(pb["iv"])
+        ct = b64url(pb["payload"])
+
+        from cryptography.hazmat.primitives.ciphers.aead import AESGCM
+
+        plain = AESGCM(key).decrypt(iv, ct, None).decode("utf-8", "replace")
+        decoded = __import__("json").loads(plain)
+        for src in decoded.get("sources") or []:
+            url = src.get("url")
+            if url:
+                kind = _kind_of(url)
+                if kind != "unknown":
+                    log.info("http-resolve OK (bysekoze): %s -> %s", embed_url, url[:120])
+                    return {"url": url, "kind": kind}
+        log.info("http-resolve no playable source in bysekoze payload for %s", embed_url)
+    except Exception:
+        log.exception("http-resolve bysekoze error for %s", embed_url)
+    return None
+
+
 def resolve_http(embed_url: str, referer: str | None = None) -> dict | None:
     """Try to resolve ``embed_url`` to a media URL using plain HTTP.
 
@@ -72,6 +175,11 @@ def resolve_http(embed_url: str, referer: str | None = None) -> dict | None:
     """
     try:
         embed_url = embed_url.strip()
+        netloc = urlparse(embed_url).netloc.lower()
+        if "vidaraa" in netloc:
+            return _resolve_vidaraa(embed_url, referer)
+        if "bysekoze" in netloc:
+            return _resolve_bysekoze(embed_url)
         page_ref = referer or "{}://{}/".format(
             urlparse(embed_url).scheme, urlparse(embed_url).netloc
         )
