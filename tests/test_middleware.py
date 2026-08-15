@@ -359,6 +359,48 @@ def test_stream_sniffs_mp2t_for_text_plain_ts(monkeypatch):
         server.http_sessions.pop("ts-sid", None)
 
 
+def test_http_fetch_retries_transient_5xx(monkeypatch):
+    """The CDNs return 502/429 flakily from datacenter IPs under a player's
+    parallel burst — _http_fetch must retry before surfacing the error."""
+    import curl_cffi.requests as ccr
+
+    from middleware import server
+
+    server.http_sessions["retry-sid"] = {
+        "url": "https://cdn.test/p/seg-1.ts",
+        "referer": "https://embed.test/e/1",
+    }
+
+    class FakeResp:
+        def __init__(self, status, ct, content):
+            self.status_code = status
+            self.headers = {"content-type": ct}
+            self.content = content
+
+    state = {"n": 0}
+
+    def fake_cc_get(url, **kwargs):
+        state["n"] += 1
+        if state["n"] < 3:
+            return FakeResp(502, "text/html", b"bad gateway")
+        return FakeResp(200, "video/mp2t", b"\x47" + b"\x00" * 187)
+
+    import requests as _plain
+
+    def raise_plain(*a, **k):
+        raise _plain.RequestException("fallback disabled in test")
+
+    monkeypatch.setattr(ccr, "get", fake_cc_get)
+    monkeypatch.setattr(_plain, "get", raise_plain)
+    try:
+        st, ct, body = server._http_fetch("retry-sid", "https://cdn.test/p/seg-1.ts")
+    finally:
+        server.http_sessions.pop("retry-sid", None)
+    assert state["n"] == 3
+    assert st == 200
+    assert body.startswith(b"\x47")
+
+
 def test_direct_endpoint_returns_raw_media_urls(monkeypatch):
     """POST /direct returns CDN URLs without proxy wrapping, with caching."""
     from fastapi.testclient import TestClient

@@ -250,8 +250,20 @@ function play(url) {
     return;
   }
   if (!isMp4 && window.Hls && Hls.isSupported()) {
-    hls = new Hls({ enableWebVTT: true, subtitleDisplay: true });
+    hls = new Hls({ enableWebVTT: true, subtitleDisplay: true, maxRetry: 4, fragLoadingMaxRetry: 4 });
     attachSubs(video, subsBar);
+    hls.on(Hls.Events.ERROR, (_e, err) => {
+      if (!err.fatal) return;
+      const kind = err.type === Hls.ErrorTypes.MEDIA_ERROR ? "خطأ وسائط" : "خطأ شبكة";
+      if (hls.autoRecoverError) {
+        setStatus(kind + ": " + (err.details || "") + " — محاولة استعادة…");
+        hls.autoRecoverError = false;
+        hls.recoverMediaError();
+        setTimeout(() => hls.startLoad(), 1000);
+        return;
+      }
+      setStatus(kind + ": " + (err.details || "") + " — اضغط تشغيل مرة أخرى للمحاولة", true);
+    });
     hls.loadSource(url);
     hls.attachMedia(video);
     if (subsBar) {

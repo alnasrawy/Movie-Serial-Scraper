@@ -332,7 +332,13 @@ def _http_fetch(sid: str, url: str) -> tuple[int, str, bytes] | None:
     Prefers curl_cffi with a Chrome TLS fingerprint — the video CDNs bot-block
     plain ``requests`` fingerprints (they return 502/429) but serve the same
     URL fine to an impersonated browser client.
+
+    The CDNs are flaky from datacenter IPs under a player's parallel burst:
+    retry transient 5xx/429/408 responses and transport errors before giving
+    up, so a single dropped segment doesn't kill playback.
     """
+    import time as _t
+
     import requests as _plain
 
     try:
@@ -353,18 +359,30 @@ def _http_fetch(sid: str, url: str) -> tuple[int, str, bytes] | None:
     cookie = ep.get("cookie")
     if cookie:
         headers["Cookie"] = cookie
-    try:
-        if _imp is not None:
-            resp = _imp.get(url, impersonate="chrome131", headers=headers, timeout=30)
-            return resp.status_code, resp.headers.get("content-type", ""), resp.content
-    except Exception as exc:
-        log.debug("http-proxy impersonated fetch failed for %s: %s", url, exc)
-    try:
-        resp = _plain.get(url, headers=headers, timeout=30)
-        return resp.status_code, resp.headers.get("content-type", ""), resp.content
-    except _plain.RequestException as exc:
-        log.debug("http-proxy fetch failed for %s: %s", url, exc)
-        return None
+
+    last: tuple[int, str, bytes] | None = None
+    for attempt in range(3):
+        if attempt:
+            _t.sleep(0.3 * attempt)
+        ok = False
+        try:
+            if _imp is not None:
+                resp = _imp.get(url, impersonate="chrome131", headers=headers, timeout=30)
+                last = (resp.status_code, resp.headers.get("content-type", ""), resp.content)
+                ok = resp.status_code < 500
+                if ok or attempt == 2:
+                    return last
+        except Exception as exc:
+            log.debug("http-proxy impersonated fetch failed for %s: %s", url, exc)
+        try:
+            resp = _plain.get(url, headers=headers, timeout=30)
+            last = (resp.status_code, resp.headers.get("content-type", ""), resp.content)
+            ok = resp.status_code < 500
+            if ok or attempt == 2:
+                return last
+        except _plain.RequestException as exc:
+            log.debug("http-proxy fetch failed for %s: %s", url, exc)
+    return last
 
 
 def _http_stream(sid: str, url: str, range_header: str | None) -> tuple[int, str, dict, Any] | None:
@@ -375,6 +393,8 @@ def _http_stream(sid: str, url: str, range_header: str | None) -> tuple[int, str
     via Range anyway, so /stream must forward the client's Range and stream the
     upstream body back instead of buffering the whole file.
     """
+    import time as _t
+
     import requests as _plain
 
     try:
@@ -396,18 +416,26 @@ def _http_stream(sid: str, url: str, range_header: str | None) -> tuple[int, str
     cookie = ep.get("cookie")
     if cookie:
         headers["Cookie"] = cookie
-    try:
-        if _imp is not None:
-            resp = _imp.get(url, impersonate="chrome131", headers=headers, timeout=30, stream=True)
-            return resp.status_code, resp.headers.get("content-type", ""), resp.headers, resp.iter_content(chunk_size=65536)
-    except Exception as exc:
-        log.debug("http-proxy ranged stream failed for %s: %s", url, exc)
-    try:
-        resp = _plain.get(url, headers=headers, timeout=30, stream=True)
-        return resp.status_code, resp.headers.get("content-type", ""), resp.headers, resp.iter_content(chunk_size=65536)
-    except _plain.RequestException as exc:
-        log.debug("http-proxy ranged stream fallback failed for %s: %s", url, exc)
-        return None
+    last: tuple[int, str, dict, Any] | None = None
+    for attempt in range(3):
+        if attempt:
+            _t.sleep(0.3 * attempt)
+        try:
+            if _imp is not None:
+                resp = _imp.get(url, impersonate="chrome131", headers=headers, timeout=30, stream=True)
+                last = (resp.status_code, resp.headers.get("content-type", ""), resp.headers, resp.iter_content(chunk_size=65536))
+                if resp.status_code < 500 or attempt == 2:
+                    return last
+        except Exception as exc:
+            log.debug("http-proxy ranged stream failed for %s: %s", url, exc)
+        try:
+            resp = _plain.get(url, headers=headers, timeout=30, stream=True)
+            last = (resp.status_code, resp.headers.get("content-type", ""), resp.headers, resp.iter_content(chunk_size=65536))
+            if resp.status_code < 500 or attempt == 2:
+                return last
+        except _plain.RequestException as exc:
+            log.debug("http-proxy ranged stream fallback failed for %s: %s", url, exc)
+    return last
 
 
 @app.post("/resolve")
@@ -860,18 +888,25 @@ async def stream(sid: str = Query(""), url: str = Query(...), ref: str = "", sit
         and ("dash" in content_type or _path_lower(url).endswith((".mpd", "/manifest")))
     )
 
-    # token died: refresh the session and retry once for playlists. Match on
-    # the URL path + content-type (is_playlist above requires 2xx, which a
-    # dead-token response is not).
-    if (
+    # token died: refresh the session and retry once. Match on the URL path +
+    # content-type for playlists (a dead-token response is not a 2xx), and also
+    # refresh on 401/403 for any URL — segments share the token too. Cooldown
+    # guards against re-resolving on every dropped segment.
+    dead_token = bool(
         status is not None
         and status >= 400
         and (
-            _path_lower(url).endswith((".m3u8", ".txt", ".mpd", "/manifest"))
+            status in (401, 403)
+            or _path_lower(url).endswith((".m3u8", ".txt", ".mpd", "/manifest"))
             or "mpegurl" in content_type
             or "dash" in content_type
         )
-    ):
+    )
+    refresh_ok = True
+    if http_ep:
+        last = http_ep.get("last_refresh") or 0
+        refresh_ok = time.monotonic() - last > 60
+    if dead_token and refresh_ok:
         new_url = url
         refreshed = False
         if browser_session is not None:
@@ -899,6 +934,7 @@ async def stream(sid: str = Query(""), url: str = Query(...), ref: str = "", sit
                     refreshed = True
             if refreshed:
                 http_ep["url"] = new_url
+            http_ep["last_refresh"] = time.monotonic()
         if refreshed:
             got = await mgr.fetch(sid, new_url) if browser_session is not None else await asyncio.to_thread(_http_fetch, sid, new_url)
             if got:
