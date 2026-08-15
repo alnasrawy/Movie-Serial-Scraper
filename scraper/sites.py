@@ -42,13 +42,19 @@ def load_config(path: str | Path) -> SiteConfig:
 
 
 def load_sites(directory: str | Path = "configs") -> list[SiteConfig]:
-    """Load every *.json config from a directory."""
+    """Load every *.json config from a directory.
+
+    ``providers.json`` is the middleware's provider bundle (primetv,
+    subtitles, ...), not a site config — it is skipped.
+    """
     directory = Path(directory)
     if not directory.is_dir():
         log.warning("Config directory %s not found", directory)
         return []
     sites: list[SiteConfig] = []
     for path in sorted(directory.glob("*.json")):
+        if path.name == "providers.json":
+            continue
         try:
             sites.append(load_config(path))
         except Exception as exc:

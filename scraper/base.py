@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -75,7 +76,13 @@ class BaseScraper:
                     if not any(k == "download_servers" for k in sub.get("servers", []))
                 ]
             try:
-                results = [self.parse_detail(self._fetch_detail(item), item) for item in results]
+                with ThreadPoolExecutor(max_workers=min(4, len(results) or 1)) as pool:
+                    results = list(
+                        pool.map(
+                            lambda item: self.parse_detail(self._fetch_detail(item), item),
+                            results,
+                        )
+                    )
             finally:
                 if saved_extra is not None:
                     self.config.custom["extra_detail_pages"] = saved_extra

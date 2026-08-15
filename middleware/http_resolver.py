@@ -36,6 +36,30 @@ _SRC_RE = re.compile(
 _EMBED_TIMEOUT = 20.0
 _MEDIA_TIMEOUT = 25.0
 
+# Hosts known to be impossible to resolve over plain HTTP (browser-only JS,
+# reCAPTCHA, dead origins). Skipping them avoids a wasted 20s GET+timeout
+# during /watch resolve, which is the main latency driver on the free tier.
+# Each entry is a host fragment matched against the embed URL's netloc.
+_HTTP_UNRESOLVABLE = (
+    "hgcloud.to",
+    "vibuxer",
+    "acek-cdn",
+    "bibplayer",
+    "mixdrop",
+    "playmogo",
+    "dsvplay",
+    "koramaup",
+    "uqload",
+    "okru",
+    "voe.",
+    "stmruby",
+)
+
+
+def _http_hopeless(embed_url: str) -> bool:
+    netloc = urlparse(embed_url).netloc.lower()
+    return any(frag in netloc for frag in _HTTP_UNRESOLVABLE)
+
 
 def _kind_of(url: str) -> str:
     low = url.lower()
@@ -176,6 +200,9 @@ def resolve_http(embed_url: str, referer: str | None = None) -> dict | None:
     try:
         embed_url = embed_url.strip()
         netloc = urlparse(embed_url).netloc.lower()
+        if _http_hopeless(embed_url):
+            log.info("http-resolve skip (known hopeless): %s", embed_url)
+            return None
         if "vidaraa" in netloc:
             return _resolve_vidaraa(embed_url, referer)
         if "bysekoze" in netloc:

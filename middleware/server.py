@@ -557,14 +557,17 @@ async def watch(req: WatchRequest, request: Request) -> dict:
               "servers": [{name, site, kind, proxy_url}]}
 
     Source selection: an explicit `sites` list is used as-is. Movies and TV
-    both default to our Arabic sites (akwams, egydead). For TV with a
-    season/episode the search query gets an Arabic episode suffix appended
-    (akwams matches "… الموسم الاول الحلقة 8" exactly) and scraped items are
-    filtered to the requested episode, so series pages don't mix episodes.
+    both default to all configured Arabic sites (akwams, egydead, larroza, ...)
+    so the app's list gets every working source. For TV with a season/episode
+    the search query gets an Arabic episode suffix appended (akwams matches
+    "… الموسم الاول الحلقة 8" exactly) and scraped items are filtered to the
+    requested episode, so series pages don't mix episodes.
     """
     sites = [s.strip() for s in (req.sites or []) if s.strip()]
     if not sites:
-        sites = ["akwams", "egydead"]
+        from scraper.sites import available_sites
+
+        sites = [name for name in available_sites() if name != "primetv"]
     if not sites and not req.tmdb_id:
         raise HTTPException(400, "Provide 'sites' or 'tmdb_id'")
 

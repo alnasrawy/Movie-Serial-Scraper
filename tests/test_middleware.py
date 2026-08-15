@@ -896,11 +896,12 @@ def test_watch_adds_primetv_foreign_servers(monkeypatch):
 
 
 def test_watch_movie_defaults_to_our_arabic_sites(monkeypatch):
-    """A movie with no `sites` scrapes our own Arabic sites (akwams, egydead)."""
+    """A movie with no `sites` scrapes every configured Arabic site."""
     from fastapi.testclient import TestClient
 
     from middleware import server
     from middleware import primetv, subtitles
+    from scraper.sites import available_sites
 
     calls = {"sites": None}
 
@@ -940,12 +941,12 @@ def test_watch_movie_defaults_to_our_arabic_sites(monkeypatch):
         c = TestClient(server.app)
         r = c.post("/watch", json={"tmdb_id": 27205, "type": "movie"})
         assert r.status_code == 200
-        # our own Arabic engine runs by default for movies
-        assert calls["sites"] == ["akwams", "egydead"]
+        # our own Arabic engine runs by default for movies (all sites)
+        assert calls["sites"] == [s for s in available_sites() if s != "primetv"]
 
         # TV keeps the fast path: no Arabic scrape unless sites are explicit
         r3 = c.post("/watch", json={"tmdb_id": 1396, "type": "tv", "season": 1, "episode": 1})
         assert r3.status_code == 200
-        assert calls["sites"] == ["akwams", "egydead"]  # unchanged -> no tv scrape
+        assert calls["sites"] == [s for s in available_sites() if s != "primetv"]  # unchanged -> no tv scrape
     finally:
         server.http_sessions.clear()
