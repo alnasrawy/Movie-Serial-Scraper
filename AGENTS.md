@@ -24,7 +24,7 @@ python cli.py --list
 python cli.py --query "inception" --sites "akwams,egydead" --watch-only
 python final_links.py "inception"            # one-shot: scrape + resolve + live HLS links
 python -m middleware                          # standalone FastAPI server (uvicorn :8000)
-python -m pytest tests -q                     # 84 tests, no network needed
+python -m pytest tests -q                     # 85 tests, no network needed
 ```
 
 ## Architecture
@@ -44,15 +44,6 @@ scraper/
 middleware/
   http_resolver.py  -> PURE-HTTP resolver (no browser): GET embed -> unpack_packer
                        -> .urlset/master.txt -> HLS with Referer. Cheap/fast path.
-  vidsrc.py         -> foreign provider (vidsrc family) with NO browser: GET the
-                       embed page -> player iframe (static `vs` token) ->
-                       window.CONFIG `api` -> api.php JSON (data.stream_urls may
-                       be base64 ChaCha20 protected) -> wasmtime-decrypt via
-                       `vs.wasm_url` -> GET {host}/generate.php for an IP-bound
-                       JWT -> stamp master.m3u8. Tokens bind to OUR IP, so these
-                       play only through the /stream proxy. wasmtime is a pure
-                       Python WASM runtime (tiny transient memory). Resolve is
-                       cached 10 min (JWT lives ~4h).
   subtitles.py      -> OpenSubtitles legacy API (rest.opensubtitles.org) keyed
                        by IMDb id: search -> pick most-downloaded for a language
                        -> download .gz -> decode (cp1256/utf-8) -> srt->vtt.
@@ -94,7 +85,7 @@ direct_links.py     -> ONE command that prints DIRECT m3u8 media URLs (no proxy)
                        in ExoPlayer/VLC (EarnVids hls2 tokens last ~36h, no Referer).
 final_links.py      -> one command: scrape(watch_only) -> open each embed -> keep a
                        uvicorn proxy alive -> print final http://127.0.0.1:<port>/stream? URLs
-tests/              -> 68 tests. conftest.py sets PROJECT_ROOT on sys.path and starts
+tests/              -> 85 tests. conftest.py sets PROJECT_ROOT on sys.path and starts
                        a local mock site (tests/mock_site.py) — no internet required.
 ```
 
@@ -133,11 +124,6 @@ tests/              -> 68 tests. conftest.py sets PROJECT_ROOT on sys.path and s
   contains a 0x47 ("G"), so a naive `find(b"\x47")` is WRONG (regression tested).
 - `mixdrop` (reCAPTCHA), `playmogo/dsvplay` (no media start) and `koramaup`
   (obfuscated JS) do **not** resolve yet — document, don't force.
-- **Foreign provider (`vidsrc.py`) is fully HTTP-only** — no browser, ever:
-  the embed iframe `vs` token is static text; the api.php `vs` block (the wasm
-  decryptor) sits at the **top level** of the JSON, NOT inside `data`;
-  `stream_urls` may be a plain array OR base64 ChaCha20(nonce||ciphertext).
-  `wasmtime` is a pure-Python WASM runtime — no sidecar process.
 - **OpenSubtitles legacy API (`subtitles.py`) WAF rules:**
   - The search URL must use the **numeric** IMDb id (`imdbid-1375666`). The
     `tt` prefix makes their WAF 302 you into a `_` sinkhole host that fails

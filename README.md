@@ -29,7 +29,7 @@ project/
 ├── middleware/            # الوسيط: يحوّل embed → بث HLS
 │   ├── server.py          #   FastAPI: /resolve /stream /health
 │   └── player.py          #   جلسات Chromium + جلب عبر ctx.request + تجديد التوكين
-└── tests/                 # 38 اختبارًا (بدون اتصال خارجي)
+└── tests/                 # 85 اختبارًا (بدون اتصال خارجي)
 ```
 
 ## التثبيت

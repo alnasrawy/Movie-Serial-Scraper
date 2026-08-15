@@ -90,7 +90,7 @@ $("frm").addEventListener("submit", async (ev) => {
   if (/^\d+$/.test(raw)) {
     body.tmdb_id = parseInt(raw, 10);
   } else {
-    // Resolve the title to a TMDB id so foreign providers (vidsrc/primetv) run too.
+    // Resolve the title to a TMDB id so foreign providers (primetv) run too.
     try {
       const want = $("type").value;
       const sr = await fetch("/tmdb/search?q=" + encodeURIComponent(raw) + "&page=1");

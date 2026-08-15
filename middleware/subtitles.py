@@ -140,7 +140,7 @@ def search(imdb_id: str, timeout: float = 20.0, lang: str | None = None) -> list
     x_ua = _cfg().get("x_user_agent")
     if x_ua:
         # The legacy API blocks unknown user agents / flagged IPs but honours a
-        # registered X-User-Agent (the vidsrc player itself uses trailers.to-UA).
+        # registered X-User-Agent (their own player sends trailers.to-UA).
         headers["X-User-Agent"] = x_ua
     retries = int(_cfg().get("retries", 2))
     for attempt in range(retries + 1):

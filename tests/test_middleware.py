@@ -692,7 +692,6 @@ def test_watch_adds_primetv_foreign_servers(monkeypatch):
 
     from middleware import primetv
     from middleware import server
-    from middleware import vidsrc
 
     def fake_tmdb_title(tmdb_id, key=None, media_type="movie"):
         return {
@@ -735,7 +734,6 @@ def test_watch_adds_primetv_foreign_servers(monkeypatch):
     monkeypatch.setattr(primetv, "is_enabled", lambda: True)
     monkeypatch.setattr(primetv, "resolve", fake_resolve)
     monkeypatch.setattr(primetv, "_cfg", lambda: {"label": "سيرفر برايم"})
-    monkeypatch.setattr(vidsrc, "is_enabled", lambda: False)
 
     server.http_sessions.clear()
     server._watch_cache.clear()
@@ -763,7 +761,7 @@ def test_watch_movie_defaults_to_our_arabic_sites(monkeypatch):
     from fastapi.testclient import TestClient
 
     from middleware import server
-    from middleware import primetv, subtitles, vidsrc
+    from middleware import primetv, subtitles
 
     calls = {"sites": None}
 
@@ -794,7 +792,6 @@ def test_watch_movie_defaults_to_our_arabic_sites(monkeypatch):
     monkeypatch.setattr(primetv, "is_enabled", lambda: True)
     monkeypatch.setattr(primetv, "resolve", fake_resolve)
     monkeypatch.setattr(primetv, "_cfg", lambda: {"label": "سيرفر برايم"})
-    monkeypatch.setattr(vidsrc, "is_enabled", lambda: False)
     monkeypatch.setattr(subtitles, "is_enabled", lambda: False)
     monkeypatch.setattr(server, "_tmdb_external_imdb", lambda tmdb_id, media_type: "")
 

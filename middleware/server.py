@@ -655,10 +655,10 @@ async def _refresh_primetv(http_ep: dict) -> tuple[str, bool]:
 
 
 async def _add_foreign_servers(req: WatchRequest, base: str, servers: list[dict]) -> tuple[str, list[dict]]:
-    """Resolve foreign (vidsrc/primetv) streams for a TMDB id and append proxied servers.
+    """Resolve foreign (primetv/easyplex) streams for a TMDB id and append proxied servers.
 
-    The two providers are independent and run in parallel (each does up to a
-    few seconds of HTTP); the subtitle language list is fetched once afterwards.
+    Runs in parallel with the TMDB external-id lookup (a few seconds of HTTP);
+    the subtitle language list is fetched once afterwards.
 
     Returns (imdb_id, subtitle languages) — the former is needed by the app to
     fetch subtitles later via /subtitle.
@@ -668,34 +668,6 @@ async def _add_foreign_servers(req: WatchRequest, base: str, servers: list[dict]
     from scraper.tmdb import api_key, tmdb_title
     from . import primetv
     from . import subtitles as subs
-    from . import vidsrc
-
-    async def job_vidsrc() -> dict:
-        if not vidsrc.is_enabled():
-            return {"servers": [], "imdb_id": ""}
-        res = await asyncio.to_thread(
-            vidsrc.resolve, req.tmdb_id, req.type, season=req.season, episode=req.episode
-        )
-        label = vidsrc._cfg().get("label", "سيرفر أجنبي")
-        built = []
-        for i, sv in enumerate(res.servers, 1):
-            sid = _new_sid()
-            http_sessions[sid] = {
-                "url": sv["url"],
-                "referer": vidsrc._cfg().get("player_referer", "https://cloudorchestranova.com/"),
-                "kind": "vidsrc",
-                "base_url": sv["base"],
-                "host": sv["host"],
-                "created": time.monotonic(),
-            }
-            built.append({
-                "site": "vidsrc",
-                "name": "{} {}".format(label, i),
-                "kind": "hls",
-                "proxy_url": base + _proxy_url(sid, sv["url"], ext=_ext_for("hls")),
-                "foreign": True,
-            })
-        return {"servers": built, "imdb_id": res.imdb_id}
 
     async def job_imdb() -> str:
         if not subs.is_enabled():
@@ -758,14 +730,9 @@ async def _add_foreign_servers(req: WatchRequest, base: str, servers: list[dict]
             })
         return built
 
-    vidsrc_res, ext_imdb, primetv_servers = await asyncio.gather(
-        job_vidsrc(), job_imdb(), job_primetv()
-    )
+    ext_imdb, primetv_servers = await asyncio.gather(job_imdb(), job_primetv())
 
-    for s in vidsrc_res["servers"]:
-        servers.append(s)
-
-    imdb_id = vidsrc_res["imdb_id"] or ext_imdb or ""
+    imdb_id = ext_imdb or ""
     sub_langs: list[dict] = []
     if imdb_id and subs.is_enabled():
         try:
@@ -961,18 +928,10 @@ async def stream(sid: str = Query(""), url: str = Query(...), ref: str = "", sit
             refreshed = await mgr.refresh_session(sid)
             new_url = getattr(browser_session, "new_url", url)
         elif http_ep:
-            # HTTP sessions: re-resolve the embed and mint a fresh URL. For
-            # vidsrc sessions the stream data is static — just re-mint the
-            # host JWT and restamp the (token-less) master playlist URL.
+            # HTTP sessions: re-resolve the embed and mint a fresh URL.
             from . import primetv
-            from . import vidsrc
 
-            if http_ep.get("kind") == "vidsrc":
-                new_url = await asyncio.to_thread(
-                    vidsrc.restamp_master, http_ep.get("base_url") or url, http_ep.get("host") or ""
-                )
-                refreshed = bool(new_url)
-            elif http_ep.get("kind") == "primetv":
+            if http_ep.get("kind") == "primetv":
                 new_url, refreshed = await _refresh_primetv(http_ep)
             else:
                 re_got = await asyncio.to_thread(resolve_http, http_ep["referer"], None)
@@ -1134,7 +1093,7 @@ def _tmdb_fetch(path: str, params: dict) -> dict:
 
 
 def _tmdb_external_imdb(tmdb_id: int, media_type: str) -> str:
-    """IMDb id from TMDB external_ids (used for subtitles when vidsrc is off)."""
+    """IMDb id from TMDB external_ids (used for /subtitle)."""
     import requests as _requests
 
     path = "/{}/{}/external_ids".format("tv" if media_type == "tv" else "movie", tmdb_id)
@@ -1166,12 +1125,11 @@ async def tmdb_search(q: str = Query(...), page: int = Query(1)) -> dict:
 @app.get("/health")
 async def health() -> dict:
     from . import subtitles as subs
-    from . import vidsrc
 
     mgr = get_manager()
     n_browser = len(mgr.sessions) if mgr is not None else 0
     providers = {}
-    for name, mod in (("vidsrc", vidsrc), ("subtitles", subs)):
+    for name, mod in (("subtitles", subs),):
         providers[name] = {
             "enabled": mod.is_enabled(),
             "curl_cffi": bool(getattr(mod, "_IMPERSONATE", None)),

@@ -1,14 +1,4 @@
 {
-  "vidsrc": {
-    "enabled": false,
-    "embed_base": "https://vidsrcme.ru",
-    "referer": "https://vidsrcme.ru/",
-    "player_referer": "https://cloudorchestranova.com/",
-    "timeout": 25,
-    "max_servers": 3,
-    "label": "سيرفر أجنبي",
-    "doh_url": "https://cloudflare-dns.com/dns-query"
-  },
   "primetv": {
     "enabled": true,
     "engine_base_url": "https://primeott.sytes.net/engine/",
