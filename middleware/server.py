@@ -669,6 +669,12 @@ async def _add_foreign_servers(req: WatchRequest, base: str, servers: list[dict]
     from . import primetv
     from . import subtitles as subs
 
+    # The PrimeTV engine refuses TV lookups without a season/episode (it falls
+    # into a per-IP "verification code" flow that 429s). Default to S1E1 when
+    # the caller didn't pick an episode so series still resolve.
+    season = req.season if req.season is not None else (1 if req.type == "tv" else None)
+    episode = req.episode if req.episode is not None else (1 if req.type == "tv" else None)
+
     async def job_imdb() -> str:
         if not subs.is_enabled():
             return ""
@@ -695,8 +701,8 @@ async def _add_foreign_servers(req: WatchRequest, base: str, servers: list[dict]
             req.type,
             title=ptitle,
             year=info.get("year"),
-            season=req.season,
-            episode=req.episode,
+            season=season,
+            episode=episode,
         )
         label = primetv._cfg().get("label", "سيرفر برايم")
         provider_args = {
@@ -704,8 +710,8 @@ async def _add_foreign_servers(req: WatchRequest, base: str, servers: list[dict]
             "type": req.type,
             "title": ptitle,
             "year": info.get("year"),
-            "season": req.season,
-            "episode": req.episode,
+            "season": season,
+            "episode": episode,
         }
         built = []
         for i, sv in enumerate(res.servers, 1):
