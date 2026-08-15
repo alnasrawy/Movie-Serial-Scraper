@@ -359,6 +359,25 @@ def test_stream_sniffs_mp2t_for_text_plain_ts(monkeypatch):
         server.http_sessions.pop("ts-sid", None)
 
 
+def test_http_media_stream_sniffs_png_first_chunk(monkeypatch):
+    """Streamed segments: PNG wrapper must be stripped from the FIRST chunk,
+    and the media type sniffed to mp2t — without buffering the whole body."""
+    from middleware import server
+
+    ts_packet = b"\x47" + b"\x00" * 187
+    ts = ts_packet * 10
+    png = b"\x89PNG\r\n\x1a\n" + ts
+
+    def fake_stream(sid, url, range_header):
+        return 200, "application/octet-stream", {}, iter([png[:3000], png[3000:]])
+
+    monkeypatch.setattr(server, "_http_stream", fake_stream)
+    st, ct, hdrs, chunks = server._http_media_stream("x", "https://cdn.test/p/seg.ts", "bytes=0-")
+    assert st == 200
+    assert ct == "video/mp2t"
+    assert b"".join(chunks) == ts
+
+
 def test_http_fetch_retries_transient_5xx(monkeypatch):
     """The CDNs return 502/429 flakily from datacenter IPs under a player's
     parallel burst — _http_fetch must retry before surfacing the error."""

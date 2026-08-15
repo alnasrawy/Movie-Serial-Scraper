@@ -438,6 +438,46 @@ def _http_stream(sid: str, url: str, range_header: str | None) -> tuple[int, str
     return last
 
 
+def _http_media_stream(sid: str, url: str, range_header: str | None) -> tuple[int, str, dict, Any] | None:
+    """Ranged streaming fetch for any media (TS segments, mp4, DASH m4s).
+
+    Buffering a whole 2-4 MB segment before replying makes scrubbing feel like
+    minutes — instead stream the upstream body through, forwarding the client's
+    Range so the CDN serves only the bytes the player asked for. The first
+    chunk is sniffed to fix the media type (PNG wrapper / text/plain TS).
+    """
+    result = _http_stream(sid, url, range_header)
+    if result is None:
+        return None
+    up_status, up_ct, up_headers, chunks = result
+    if up_status >= 400:
+        return up_status, up_ct or "", {}, None
+    first = b""
+    try:
+        first = next(chunks)
+    except StopIteration:
+        pass
+    ct = (up_ct or "").lower()
+    looks_ts = bool(
+        _path_lower(url).endswith((".ts", ".m4s"))
+        or ct in ("text/plain", "application/octet-stream")
+        or first.startswith(b"\x89PNG")
+    )
+    media_ct = up_ct or "application/octet-stream"
+    if looks_ts:
+        off = _ts_start(first)
+        if off > 0:
+            first = first[off:]
+            media_ct = "video/mp2t"
+
+    def gen():
+        if first:
+            yield first
+        yield from chunks
+
+    return up_status, media_ct, up_headers, gen()
+
+
 @app.post("/resolve")
 async def resolve(req: ResolveRequest, request: Request) -> dict:
     result = await _resolve_embed(req.url, req.referer)
@@ -856,26 +896,34 @@ async def stream(sid: str = Query(""), url: str = Query(...), ref: str = "", sit
         if got:
             status, content_type, body = got
     elif http_ep:
-        # mp4 media: stream with a RANGED upstream fetch so the CDN serves 206
-        # instead of refusing full GETs from the server IP; this also gives
-        # players working seek/Range support. Match on the URL *path* — CDN
-        # media URLs carry signed tokens in the query string.
-        if _path_lower(url).endswith(".mp4"):
+        # Playlists/manifests need the full buffered body (we rewrite them).
+        # Everything else — mp4, TS segments, DASH m4s — is STREAMED with Range
+        # forwarding instead of buffering the whole 2-4 MB segment first, so
+        # scrubbing starts instantly instead of after the whole segment
+        # downloads from the CDN.
+        if _path_lower(url).endswith((".m3u8", ".txt", ".mpd", "/manifest")):
+            got = await asyncio.to_thread(_http_fetch, sid, url)
+            if got:
+                status, content_type, body = got
+        else:
             client_range = request.headers.get("range") if request is not None else None
-            streamed = await asyncio.to_thread(_http_stream, sid, url, client_range)
+            streamed = await asyncio.to_thread(_http_media_stream, sid, url, client_range)
             if streamed is not None:
                 up_status, up_ct, up_headers, chunks = streamed
                 if up_status >= 400:
-                    return Response(status_code=up_status, content=b"", media_type=up_ct or "text/plain")
-                pass_headers = {
-                    k: v
-                    for k, v in up_headers.items()
-                    if k.lower() in ("content-range", "content-length", "accept-ranges", "content-type")
-                }
-                return StreamingResponse(chunks, media_type=up_ct or "video/mp4", status_code=up_status, headers=pass_headers)
-        got = await asyncio.to_thread(_http_fetch, sid, url)
-        if got:
-            status, content_type, body = got
+                    status, content_type, body = up_status, up_ct or "", b""
+                else:
+                    pass_headers = {
+                        k: v
+                        for k, v in up_headers.items()
+                        if k.lower() in ("content-range", "content-length", "accept-ranges")
+                    }
+                    pass_headers.setdefault("Accept-Ranges", "bytes")
+                    return StreamingResponse(chunks, media_type=up_ct, status_code=up_status, headers=pass_headers)
+            else:
+                got = await asyncio.to_thread(_http_fetch, sid, url)
+                if got:
+                    status, content_type, body = got
 
     is_playlist = bool(
         status is not None
