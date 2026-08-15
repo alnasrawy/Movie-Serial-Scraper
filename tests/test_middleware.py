@@ -211,6 +211,67 @@ def test_watch_endpoint_returns_server_list(monkeypatch):
     assert ".m3u8?" in first["proxy_url"]
 
 
+def test_series_query_appends_arabic_episode_suffix():
+    from middleware.server import _series_query
+
+    assert _series_query("House of the Dragon", 1, 8) == "House of the Dragon الموسم الاول الحلقة 8"
+    assert _series_query("House of the Dragon", 3, 2) == "House of the Dragon الموسم الثالث الحلقة 2"
+
+
+def test_match_se_filters_episode_pages():
+    from middleware.server import _match_se
+
+    ep8 = {"title": "مشاهدة مسلسل House of The Dragon الموسم الاول الحلقة 8 مترجمة", "detail_url": ""}
+    ep1 = {"title": "مشاهدة مسلسل House of The Dragon الموسم الاول الحلقة 1 مترجمة", "detail_url": ""}
+    movie = {"title": "فيلم Inception 2010 مترجم", "detail_url": ""}
+
+    assert _match_se(ep8, 1, 8) is True
+    assert _match_se(ep8, 1, 7) is False
+    assert _match_se(ep8, 2, 8) is False
+    assert _match_se(ep8, None, 8) is True
+    assert _match_se(ep8, 1, None) is True
+    assert _match_se(movie, 1, 8) is False  # no episode marker -> not ep 8
+    assert _match_se(ep1, None, None) is True  # no filter requested
+
+
+def test_watch_tv_filters_other_episodes(monkeypatch):
+    """TV /watch requests must not surface servers from other episodes."""
+    from fastapi.testclient import TestClient
+
+    from middleware import server
+
+    async def fake_resolve_embed(url, referer=None):
+        return {"sid": f"sid-{hash(url)}", "kind": "hls", "url": "https://cdn.test/master.m3u8"}
+
+    def fake_scrape_all(query, sites):
+        if "الحلقة 8" in query:
+            eps = [1, 8]
+        else:
+            eps = [1, 2, 3, 8]
+        return [{
+            "source": "akwams",
+            "title": f"مشاهدة مسلسل House of The Dragon الموسم الاول الحلقة {e} مترجمة",
+            "detail_url": f"https://akwams.org/ep-{e}",
+            "watch_servers": [{"name": "سيرفر 1", "url": f"https://embed.test/e/{e}"}],
+        } for e in eps]
+
+    monkeypatch.setattr(server, "_scrape_all", fake_scrape_all)
+    monkeypatch.setattr(server, "_resolve_embed", fake_resolve_embed)
+
+    c = TestClient(server.app)
+    r = c.post("/watch", json={
+        "query": "House of the Dragon",
+        "type": "tv",
+        "season": 1,
+        "episode": 8,
+        "sites": ["akwams"],
+    })
+    assert r.status_code == 200
+    data = r.json()
+    assert len(data["servers"]) == 1
+    assert "site_ref=https%3A%2F%2Fakwams.org%2Fep-8" in data["servers"][0]["proxy_url"]
+
+
 def test_stream_serves_http_session_without_browser(monkeypatch):
     """A sid created by the HTTP resolver streams through the requests proxy."""
     from fastapi.testclient import TestClient

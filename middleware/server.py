@@ -90,6 +90,59 @@ class WatchRequest(BaseModel):
     episode: int | None = None
 
 
+# Arabic ordinal season words used by akwams/egydead episode URLs
+# ("الموسم الاول الحلقة 8"). Egyptian Dead uses digits, so this only
+# needs to cover the spell-out form akwams uses.
+_ARABIC_ORDINAL = {
+    1: "الاول",
+    2: "الثاني",
+    3: "الثالث",
+    4: "الرابع",
+    5: "الخامس",
+    6: "السادس",
+    7: "السابع",
+    8: "الثامن",
+    9: "التاسع",
+    10: "العاشر",
+}
+
+_ORDINAL_TO_NUM = {v: k for k, v in _ARABIC_ORDINAL.items()}
+
+_SEASON_RE = re.compile(r"الموسم\s+([\w]+)")
+_EPISODE_RE = re.compile(r"الحلقة\s*(\d+)")
+
+
+def _series_query(base: str, season: int, episode: int) -> str:
+    """Append an Arabic season/episode suffix so akwams search matches the
+    exact episode page instead of returning a random batch of episodes."""
+    s_word = _ARABIC_ORDINAL.get(season, str(season))
+    return "{} الموسم {} الحلقة {}".format(base, s_word, episode)
+
+
+def _match_se(item: dict, season: int | None, episode: int | None) -> bool:
+    """True if an item's title/detail_url encodes the requested season+episode.
+
+    Returns True when neither season nor episode is requested, or when the
+    page has no season marker (movies / sites that don't annotate)."""
+    if season is None and episode is None:
+        return True
+    text = "{} {}".format(item.get("title") or "", item.get("detail_url") or "")
+    ep_m = _EPISODE_RE.search(text)
+    if episode is not None and (not ep_m or int(ep_m.group(1)) != episode):
+        return False
+    if season is not None:
+        se_m = _SEASON_RE.search(text)
+        if not se_m:
+            return True  # no season marker on the page -> can't reject
+        word = se_m.group(1)
+        se_num = _ORDINAL_TO_NUM.get(word)
+        if se_num is None and word.isdigit():
+            se_num = int(word)
+        if se_num is not None and se_num != season:
+            return False
+    return True
+
+
 def _ext_for(kind: str) -> str:
     """A URL path extension hinting the media type.
 
@@ -497,13 +550,14 @@ async def watch(req: WatchRequest, request: Request) -> dict:
     Returns: {"tmdb_id", "type", "query", "imdb_id", "subtitles",
               "servers": [{name, site, kind, proxy_url}]}
 
-    Source selection: an explicit `sites` list is used as-is. Movies default to
-    our own Arabic sites (akwams, egydead) so the app's list is our engine;
-    TV defaults to foreign providers only (fast — the Arabic sites index a
-    series by iterating every episode).
+    Source selection: an explicit `sites` list is used as-is. Movies and TV
+    both default to our Arabic sites (akwams, egydead). For TV with a
+    season/episode the search query gets an Arabic episode suffix appended
+    (akwams matches "… الموسم الاول الحلقة 8" exactly) and scraped items are
+    filtered to the requested episode, so series pages don't mix episodes.
     """
     sites = [s.strip() for s in (req.sites or []) if s.strip()]
-    if not sites and req.type == "movie":
+    if not sites:
         sites = ["akwams", "egydead"]
     if not sites and not req.tmdb_id:
         raise HTTPException(400, "Provide 'sites' or 'tmdb_id'")
@@ -532,7 +586,18 @@ async def watch(req: WatchRequest, request: Request) -> dict:
     # Some sites index a title under its Arabic name, others under the original
     # (akwams ignores "استهلال" but matches "Inception"). Try every candidate
     # and merge unique items so we keep max server coverage.
-    cache_key = (str(request.base_url).rstrip("/"), tuple(candidates), tuple(sites))
+    if req.type == "tv" and req.season is not None and req.episode is not None:
+        candidates += [
+            _series_query(c, req.season, req.episode)
+            for c in list(candidates)
+        ]
+    cache_key = (
+        str(request.base_url).rstrip("/"),
+        tuple(candidates),
+        tuple(sites),
+        req.season,
+        req.episode,
+    )
     cached = _cache_get(cache_key)
     if cached is not None:
         return {
@@ -559,6 +624,15 @@ async def watch(req: WatchRequest, request: Request) -> dict:
                 if key not in seen:
                     seen.add(key)
                     merged_items.append(item)
+
+    # For TV, drop items that encode a different episode than requested (the
+    # Arabic sites index series as one page per episode, so a bare title search
+    # returns a batch of episodes). The episode-suffixed candidate above
+    # already targets the right page; this guard also covers fallbacks.
+    if req.type == "tv" and (req.season is not None or req.episode is not None):
+        matching = [it for it in merged_items if _match_se(it, req.season, req.episode)]
+        if matching:
+            merged_items = matching
 
     items = merged_items
     base = str(request.base_url).rstrip("/")
