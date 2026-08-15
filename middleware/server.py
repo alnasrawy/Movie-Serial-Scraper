@@ -221,10 +221,16 @@ async def _resolve_many(servers: list[tuple[dict, dict]], limit: int = 8) -> lis
 
     async def one(item: dict, sv: dict) -> tuple[dict, dict, dict]:
         async with sem:
-            res = await asyncio.wait_for(
-                _resolve_embed(sv.get("url") or "", referer=item.get("detail_url")),
-                timeout=35,
-            )
+            try:
+                res = await asyncio.wait_for(
+                    _resolve_embed(sv.get("url") or "", referer=item.get("detail_url")),
+                    timeout=35,
+                )
+            except asyncio.TimeoutError:
+                # One slow embed must never take the whole /watch down: mark it
+                # failed and let the other servers answer.
+                log.warning("resolve timeout for %s", sv.get("url"))
+                res = {"kind": "none", "url": sv.get("url"), "error": "timeout"}
             return item, sv, res
 
     return await asyncio.gather(*(one(item, sv) for item, sv in servers))
