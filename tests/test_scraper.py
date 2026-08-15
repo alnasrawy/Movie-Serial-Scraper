@@ -148,6 +148,53 @@ def test_generic_scraper_extra_detail_pages():
     assert first["download_servers"] == [{"name": "تحميل مباشر", "url": "https://dl.test/m1.mp4"}]
 
 
+def test_generic_scraper_extra_detail_pages_url_template():
+    from bs4 import BeautifulSoup
+
+    from scraper.generic import GenericScraper
+
+    class VidFetcher(FakeFetcher):
+        def get_soup(self, url: str, **kwargs) -> FetchedPage:
+            if url.startswith("https://site.test/search.php"):
+                html = """
+                <article class="movie-card">
+                  <h2 class="movie-title">Inception</h2>
+                  <a class="movie-link" href="https://site.test/video.php?vid=abc">Details</a>
+                </article>
+                """
+                return FetchedPage(url=url, soup=BeautifulSoup(html, "lxml"), status_code=200)
+            if "play.php" in url:
+                html = """
+                <ul class="WatchList">
+                  <li data-embed-id="1" data-embed-url="https://mp4.okhd.site/embed-x.html"><strong>سيرفر 1</strong></li>
+                  <li data-embed-id="2" data-embed-url="https://uqload.to/e/y.html"><strong>سيرفر 2</strong></li>
+                </ul>
+                """
+                return FetchedPage(url=url, soup=BeautifulSoup(html, "lxml"), status_code=200)
+            return super().get_soup(url, **kwargs)
+
+    config = SiteConfig(
+        name="vid",
+        base_url="https://site.test/",
+        search_url="https://site.test/search.php?keywords={query}",
+        item_selector="article.movie-card",
+        fields={"title": "h2.movie-title", "detail_url": "a.movie-link@href"},
+        custom={
+            "extra_detail_pages": [
+                {"url": "play.php?vid={vid}", "servers": ["watch_servers"]},
+            ],
+            "watch_servers": {"item_selector": "ul.WatchList > li[data-embed-url]", "fields": {"name": "strong", "url": "@data-embed-url"}},
+        },
+    )
+    scraper = GenericScraper(config, VidFetcher())
+    items = scraper.scrape("inception", with_details=True)
+    first = items[0]
+    assert first["watch_servers"] == [
+        {"name": "سيرفر 1", "url": "https://mp4.okhd.site/embed-x.html"},
+        {"name": "سيرفر 2", "url": "https://uqload.to/e/y.html"},
+    ]
+
+
 def test_resolve_embed_packer_fallback_non_earnvids():
     from bs4 import BeautifulSoup
 

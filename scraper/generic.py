@@ -132,12 +132,34 @@ class GenericScraper(BaseScraper):
         sub: {"suffix": "watch", "servers": ["watch_servers", ...]} — the suffix is
         appended to the item's detail_url; each name in "servers" is a key in
         config.custom holding an {"item_selector", "fields"} spec.
+
+        Alternatively a sub may use {"url": "play.php?vid={vid}", ...} — a path
+        template filled from the detail_url's query parameters (e.g. a phpVibe
+        site whose server page is play.php but whose detail page is video.php).
         """
         detail_url = item.get("detail_url") or item.get("url")
-        suffix = sub.get("suffix")
-        if not detail_url or not suffix:
-            return
-        url = f"{detail_url.rstrip('/')}/{suffix.lstrip('/')}"
+        url = None
+        if "url" in sub:
+            tpl = sub["url"]
+            if not tpl:
+                return
+            from urllib.parse import parse_qs, urlparse
+
+            params = {
+                k: v[0]
+                for k, v in parse_qs(urlparse(detail_url or "").query).items()
+            }
+            try:
+                url = tpl.format(**params)
+            except (KeyError, IndexError) as exc:
+                log.info("Sub-page url template failed for %s: %s", tpl, exc)
+                return
+            url = absolute(self.config.base_url, url)
+        else:
+            suffix = sub.get("suffix")
+            if not detail_url or not suffix:
+                return
+            url = f"{detail_url.rstrip('/')}/{suffix.lstrip('/')}"
         try:
             sub_page = self.fetcher.get_soup(url)
         except Exception as exc:
