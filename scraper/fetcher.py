@@ -3,9 +3,12 @@
 from __future__ import annotations
 
 import logging
+import os
 import random
+import threading
 import time
 from dataclasses import dataclass, field
+from urllib.parse import urlparse
 
 import requests
 from bs4 import BeautifulSoup
@@ -20,6 +23,17 @@ DEFAULT_HEADERS = {
     ),
     "Accept-Language": "en-US,en;q=0.9,ar;q=0.8",
 }
+
+_domain_last_hit: dict[str, float] = {}
+_domain_lock = threading.Lock()
+_MIN_DOMAIN_GAP = float(os.environ.get("MIN_DOMAIN_GAP", "0.3"))
+
+
+def _domain_from_url(url: str) -> str:
+    try:
+        return urlparse(url).hostname or ""
+    except Exception:
+        return ""
 
 
 @dataclass
@@ -107,10 +121,17 @@ class Fetcher:
 
         last_err: Exception | None = None
         backoff = self.settings.retry_backoff
+        domain = _domain_from_url(url)
         for attempt in range(self.settings.retries + 1):
             if attempt:
                 time.sleep(backoff)
                 backoff *= 2
+            if domain and _MIN_DOMAIN_GAP > 0:
+                with _domain_lock:
+                    last = _domain_last_hit.get(domain, 0.0)
+                    wait = _MIN_DOMAIN_GAP - (time.monotonic() - last)
+                if wait > 0:
+                    time.sleep(wait)
             try:
                 if data is None:
                     resp = self.session.get(url, timeout=self.settings.timeout, headers=headers)
@@ -121,6 +142,9 @@ class Fetcher:
                 resp.encoding = resp.encoding or "utf-8"
                 soup = BeautifulSoup(resp.text, "lxml")
                 self._pages_fetched += 1
+                if domain:
+                    with _domain_lock:
+                        _domain_last_hit[domain] = time.monotonic()
                 return FetchedPage(url=url, soup=soup, status_code=resp.status_code, headers=dict(resp.headers))
             except RateLimitedError:
                 raise  # do not retry on explicit blocks

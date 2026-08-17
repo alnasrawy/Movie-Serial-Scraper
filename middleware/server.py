@@ -25,6 +25,7 @@ import os
 import re
 import time
 import uuid
+from collections import OrderedDict
 from typing import Any, Literal
 from urllib.parse import urljoin, urlencode
 
@@ -236,10 +237,12 @@ async def _resolve_many(servers: list[tuple[dict, dict]], limit: int = 8) -> lis
     return await asyncio.gather(*(one(item, sv) for item, sv in servers))
 
 
-# Per-title result cache: key -> (expires_ts, {"servers", "imdb_id", "subtitles"})
-_watch_cache: dict[tuple, tuple[float, dict]] = {}
+# Per-title result cache with LRU eviction and thread safety.
+_watch_cache: OrderedDict[tuple, tuple[float, dict]] = OrderedDict()
 _WATCH_CACHE_TTL = float(os.environ.get("WATCH_CACHE_TTL", "600"))
 _MAX_CACHE_ENTRIES = 200
+_cache_lock = asyncio.Lock()
+_inflight: dict[tuple, asyncio.Event] = {}
 
 
 def _cache_get(key: tuple) -> dict | None:
@@ -250,12 +253,14 @@ def _cache_get(key: tuple) -> dict | None:
     if time.monotonic() > expires:
         _watch_cache.pop(key, None)
         return None
+    _watch_cache.move_to_end(key)
     return payload
 
 
 def _cache_set(key: tuple, payload: dict) -> None:
-    if len(_watch_cache) >= _MAX_CACHE_ENTRIES:
-        _watch_cache.clear()
+    _watch_cache.pop(key, None)
+    while len(_watch_cache) >= _MAX_CACHE_ENTRIES:
+        _watch_cache.popitem(last=False)
     _watch_cache[key] = (time.monotonic() + _WATCH_CACHE_TTL, payload)
 
 
@@ -607,7 +612,8 @@ async def watch(req: WatchRequest, request: Request) -> dict:
         req.season,
         req.episode,
     )
-    cached = _cache_get(cache_key)
+    async with _cache_lock:
+        cached = _cache_get(cache_key)
     if cached is not None:
         return {
             "tmdb_id": req.tmdb_id,
@@ -619,84 +625,108 @@ async def watch(req: WatchRequest, request: Request) -> dict:
             "servers": cached["servers"],
         }
 
-    merged_items: list[dict] = []
-    seen: set[tuple] = set()
-    if sites:
-        # Run every query candidate in parallel (each internally fan-outs across
-        # sites) so the Arabic title + original title don't add up serially.
-        cand_results = await asyncio.gather(
-            *(asyncio.to_thread(_scrape_all, cand, sites) for cand in candidates)
-        )
-        for items in cand_results:
-            for item in items:
-                key = (item.get("source"), item.get("detail_url") or item.get("id") or item.get("title"))
-                if key not in seen:
-                    seen.add(key)
-                    merged_items.append(item)
+    is_leader = False
+    async with _cache_lock:
+        ev = _inflight.get(cache_key)
+        if ev is None:
+            ev = asyncio.Event()
+            _inflight[cache_key] = ev
+            is_leader = True
 
-    # For TV, drop items that encode a different episode than requested (the
-    # Arabic sites index series as one page per episode, so a bare title search
-    # returns a batch of episodes). The episode-suffixed candidate above
-    # already targets the right page; this guard also covers fallbacks.
-    if req.type == "tv" and (req.season is not None or req.episode is not None):
-        matching = [it for it in merged_items if _match_se(it, req.season, req.episode)]
-        if matching:
-            merged_items = matching
+    if not is_leader:
+        try:
+            await asyncio.wait_for(ev.wait(), timeout=120)
+        except asyncio.TimeoutError:
+            pass
+        async with _cache_lock:
+            cached = _cache_get(cache_key)
+        if cached is not None:
+            return {
+                "tmdb_id": req.tmdb_id,
+                "type": req.type,
+                "query": query,
+                "imdb_id": cached.get("imdb_id"),
+                "subtitles": cached.get("subtitles") or [],
+                "cached": True,
+                "servers": cached["servers"],
+            }
 
-    items = merged_items
-    base = str(request.base_url).rstrip("/")
+    try:
+        merged_items: list[dict] = []
+        seen: set[tuple] = set()
+        if sites:
+            cand_results = await asyncio.gather(
+                *(asyncio.to_thread(_scrape_all, cand, sites) for cand in candidates)
+            )
+            for items in cand_results:
+                for item in items:
+                    key = (item.get("source"), item.get("detail_url") or item.get("id") or item.get("title"))
+                    if key not in seen:
+                        seen.add(key)
+                        merged_items.append(item)
 
-    # Resolve each unique embed once (both candidates can match the same item).
-    to_resolve = []
-    seen_embed: set[tuple] = set()
-    for item in items:
-        for sv in item.get("watch_servers") or []:
-            if not sv.get("url"):
+        if req.type == "tv" and (req.season is not None or req.episode is not None):
+            matching = [it for it in merged_items if _match_se(it, req.season, req.episode)]
+            if matching:
+                merged_items = matching
+
+        items = merged_items
+        base = str(request.base_url).rstrip("/")
+
+        to_resolve = []
+        seen_embed: set[tuple] = set()
+        for item in items:
+            for sv in item.get("watch_servers") or []:
+                if not sv.get("url"):
+                    continue
+                key = (sv["url"], item.get("detail_url") or "")
+                if key in seen_embed:
+                    continue
+                seen_embed.add(key)
+                to_resolve.append((item, sv))
+
+        servers: list[dict] = []
+        for item, sv, res in await _resolve_many(to_resolve):
+            if res.get("kind") == "none":
                 continue
-            key = (sv["url"], item.get("detail_url") or "")
-            if key in seen_embed:
-                continue
-            seen_embed.add(key)
-            to_resolve.append((item, sv))
+            servers.append({
+                "site": item.get("source"),
+                "name": sv.get("name"),
+                "original_name": sv.get("original_name"),
+                "kind": res["kind"],
+                "proxy_url": base + _proxy_url(
+                    res["sid"], res["url"],
+                    ref=sv.get("url") or "",
+                    site_ref=item.get("detail_url") or "",
+                    ext=_ext_for(res["kind"]),
+                ),
+            })
 
-    servers: list[dict] = []
-    for item, sv, res in await _resolve_many(to_resolve):
-        if res.get("kind") == "none":
-            continue
-        servers.append({
-            "site": item.get("source"),
-            "name": sv.get("name"),
-            "original_name": sv.get("original_name"),
-            "kind": res["kind"],
-            "proxy_url": base + _proxy_url(
-                res["sid"], res["url"],
-                ref=sv.get("url") or "",
-                site_ref=item.get("detail_url") or "",
-                ext=_ext_for(res["kind"]),
-            ),
-        })
+        imdb_id, subtitles_list = await _add_foreign_servers(req, base, servers)
 
-    imdb_id, subtitles_list = await _add_foreign_servers(req, base, servers)
+        arabic_n = 0
+        for sv in servers:
+            if not sv.get("foreign"):
+                arabic_n += 1
+                sv["name"] = "سيرفر {}".format(arabic_n)
 
-    # Our Arabic sites number servers per page, so "سيرفر 2" repeats across
-    # sites/items. Renumber all non-foreign servers globally (سيرفر 1..N).
-    arabic_n = 0
-    for sv in servers:
-        if not sv.get("foreign"):
-            arabic_n += 1
-            sv["name"] = "سيرفر {}".format(arabic_n)
+        _prune_sessions()
+        async with _cache_lock:
+            _cache_set(cache_key, {"servers": servers, "imdb_id": imdb_id, "subtitles": subtitles_list})
 
-    _prune_sessions()
-    _cache_set(cache_key, {"servers": servers, "imdb_id": imdb_id, "subtitles": subtitles_list})
-
-    return {
-        "tmdb_id": req.tmdb_id,
-        "type": req.type,
-        "query": query,
-        "imdb_id": imdb_id or None,
-        "subtitles": subtitles_list,
-        "servers": servers,
-    }
+        return {
+            "tmdb_id": req.tmdb_id,
+            "type": req.type,
+            "query": query,
+            "imdb_id": imdb_id or None,
+            "subtitles": subtitles_list,
+            "servers": servers,
+        }
+    finally:
+        async with _cache_lock:
+            ev = _inflight.pop(cache_key, None)
+        if ev:
+            ev.set()
 
 
 def _prune_sessions(max_age: float = 86400.0) -> None:
@@ -837,7 +867,8 @@ async def _add_foreign_servers(req: WatchRequest, base: str, servers: list[dict]
 
 
 # Same cache namespace pattern but for /direct (raw media URLs, no proxy).
-_direct_cache: dict[tuple, tuple[float, list[dict]]] = {}
+_direct_cache: OrderedDict[tuple, tuple[float, list[dict]]] = OrderedDict()
+_direct_cache_lock = asyncio.Lock()
 
 
 def _direct_servers(req: WatchRequest) -> tuple[str, list[dict]]:
@@ -910,15 +941,21 @@ async def direct(req: WatchRequest) -> dict:
     req.sites = list(sites)
 
     cache_key = (req.query, req.tmdb_id, req.type, sites)
-    entry = _direct_cache.get(cache_key)
-    if entry is not None:
-        expires, servers = entry
-        if time.monotonic() <= expires:
-            return {"tmdb_id": req.tmdb_id, "type": req.type, "query": req.query, "cached": True, "servers": servers}
-        _direct_cache.pop(cache_key, None)
+    async with _direct_cache_lock:
+        entry = _direct_cache.get(cache_key)
+        if entry is not None:
+            expires, servers = entry
+            if time.monotonic() <= expires:
+                _direct_cache.move_to_end(cache_key)
+                return {"tmdb_id": req.tmdb_id, "type": req.type, "query": req.query, "cached": True, "servers": servers}
+            _direct_cache.pop(cache_key, None)
 
     query, servers = _direct_servers(req)
-    _direct_cache[cache_key] = (time.monotonic() + _WATCH_CACHE_TTL, servers)
+    async with _direct_cache_lock:
+        _direct_cache.pop(cache_key, None)
+        while len(_direct_cache) >= _MAX_CACHE_ENTRIES:
+            _direct_cache.popitem(last=False)
+        _direct_cache[cache_key] = (time.monotonic() + _WATCH_CACHE_TTL, servers)
     return {"tmdb_id": req.tmdb_id, "type": req.type, "query": query, "servers": servers}
 
 

@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import time
 from pathlib import Path
 from typing import Any
 
@@ -13,6 +14,9 @@ from .fetcher import Fetcher, FetchSettings
 from .generic import GenericScraper
 
 log = logging.getLogger(__name__)
+
+_sites_cache: dict[str, tuple[float, list[SiteConfig]]] = {}
+_SITES_CACHE_TTL = float(os.environ.get("SITES_CACHE_TTL", "60"))
 
 
 def _parse_config(raw: dict[str, Any]) -> SiteConfig:
@@ -46,7 +50,17 @@ def load_sites(directory: str | Path = "configs") -> list[SiteConfig]:
 
     ``providers.json`` is the middleware's provider bundle (primetv,
     subtitles, ...), not a site config — it is skipped.
+
+    Results are cached in-memory for SITES_CACHE_TTL seconds to avoid
+    re-reading JSON files on every call.
     """
+    dir_key = str(Path(directory).resolve())
+    now = time.monotonic()
+    cached = _sites_cache.get(dir_key)
+    if cached is not None:
+        ts, sites = cached
+        if (now - ts) < _SITES_CACHE_TTL:
+            return list(sites)
     directory = Path(directory)
     if not directory.is_dir():
         log.warning("Config directory %s not found", directory)
@@ -59,7 +73,8 @@ def load_sites(directory: str | Path = "configs") -> list[SiteConfig]:
             sites.append(load_config(path))
         except Exception as exc:
             log.error("Skipping %s: %s", path, exc)
-    return sites
+    _sites_cache[dir_key] = (now, sites)
+    return list(sites)
 
 
 def build_scraper(
@@ -85,3 +100,8 @@ def find_config(name: str, directory: str | Path = "configs") -> SiteConfig | No
 
 def available_sites(directory: str | Path = "configs") -> list[str]:
     return [c.name for c in load_sites(directory)]
+
+
+def invalidate_sites_cache() -> None:
+    """Force re-read of config files on next load_sites() call."""
+    _sites_cache.clear()
