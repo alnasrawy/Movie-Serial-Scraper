@@ -849,7 +849,33 @@ async def _add_foreign_servers(req: WatchRequest, base: str, servers: list[dict]
             })
         return built
 
-    ext_imdb, primetv_servers = await asyncio.gather(job_imdb(), job_primetv())
+    async def job_cnsource() -> list[dict]:
+        from . import cnsource
+        if not cnsource.is_enabled():
+            return []
+        res = await asyncio.to_thread(
+            cnsource.resolve,
+            req.tmdb_id,
+            req.type,
+            season=season,
+            episode=episode,
+        )
+        label = cnsource._cfg().get("label", "سورس صيني")
+        built = []
+        for i, sv in enumerate(res.servers, 1):
+            built.append({
+                "site": "cnsource",
+                "name": "{} {}".format(label, i),
+                "kind": sv["kind"],
+                "quality": sv.get("quality", 0),
+                "proxy_url": sv["url"],
+                "foreign": True,
+            })
+        return built
+
+    ext_imdb, primetv_servers, cnsource_servers = await asyncio.gather(
+        job_imdb(), job_primetv(), job_cnsource()
+    )
 
     imdb_id = ext_imdb or ""
     sub_langs: list[dict] = []
@@ -861,6 +887,8 @@ async def _add_foreign_servers(req: WatchRequest, base: str, servers: list[dict]
             log.warning("subtitle search failed: %s", exc)
 
     for s in primetv_servers:
+        servers.append(s)
+    for s in cnsource_servers:
         servers.append(s)
 
     return imdb_id, sub_langs
