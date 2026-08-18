@@ -249,11 +249,11 @@ def search(
     prefer = prefer_formats or []
     result = CnSourceResult()
 
+    per_source: list[list[dict]] = []
     for src in sources:
         base = src.get("base_url", "").rstrip("/")
         api_path = src.get("api_path", "/api.php/provide/vod/")
         src_timeout = float(src.get("timeout", timeout))
-        src_prefer = src.get("prefer_formats") or prefer
         if not base:
             continue
 
@@ -272,25 +272,29 @@ def search(
         if not items:
             continue
 
+        src_servers = []
         for item in items[:3]:
             m3u8_urls = _extract_unique_m3u8(item.get("vod_play_url") or "")
-            for url in m3u8_urls:
-                result.servers.append({
-                    "url": url,
+            for m3u8 in m3u8_urls[:2]:
+                src_servers.append({
+                    "url": m3u8,
                     "kind": "hls",
                     "quality": 0,
                     "source": f"cn_{src.get('name', 'unknown')}",
                     "source_name": "hnm3u8",
                 })
+        per_source.append(src_servers)
 
     seen_urls: set[str] = set()
     deduped = []
-    for sv in result.servers:
-        if sv["url"] not in seen_urls:
-            seen_urls.add(sv["url"])
-            deduped.append(sv)
+    max_per = 2
+    for i in range(max_per):
+        for group in per_source:
+            if i < len(group) and group[i]["url"] not in seen_urls:
+                seen_urls.add(group[i]["url"])
+                deduped.append(group[i])
 
-    max_servers = int(cfg.get("max_servers", 6))
+    max_servers = int(cfg.get("max_servers", 12))
     result.servers = deduped[:max_servers]
     return result
 
