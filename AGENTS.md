@@ -16,22 +16,30 @@ reloading the embed session, and proxies the HLS playlists/segments.
 ## How to run
 
 ```powershell
+# --- film_scraper/ (standalone deployment folder) ---
+cd film_scraper
 pip install -r requirements.txt
-python -m playwright install chromium        # only needed for the middleware
-pip install -r requirements-dev.txt          # only for running tests
+python run.py --list                         # عرض المواقع
+python run.py --serve                        # تشغيل الخادم :8000
+python run.py --query "inception"            # سكراب
+python run.py --final "inception"            # روابط نهائية + بروكسي
 
-python cli.py --list
-python cli.py --query "inception" --sites "akwams,egydead" --watch-only
-python final_links.py "inception"            # one-shot: scrape + resolve + live HLS links
-python -m middleware                          # standalone FastAPI server (uvicorn :8000)
-python -m pytest tests -q                     # 85 tests, no network needed
+# --- root project (development + tests) ---
+pip install -r requirements-dev.txt          # only for running tests
+python -m pytest tests -q                     # 91 tests, no network needed
 ```
 
 ## Architecture
 
+The standalone deployment lives in `film_scraper/` — copy that folder to any
+VPS and run `python run.py --serve`. The root project is for development/tests.
+
 ```
-configs/*.json      -> SiteConfig (CSS selectors, custom hooks). Sites are data.
-scraper/
+film_scraper/
+  run.py             -> Single entry point: --list, --serve, --query, --final, --direct
+  requirements.txt   -> Deployment dependencies
+  configs/*.json      -> SiteConfig (CSS selectors, custom hooks). Sites are data.
+  scraper/
   base.py           -> BaseScraper.scrape(with_details, watch_only) + SiteConfig dataclass
   fetcher.py        -> requests wrapper: politeness delay, retries, page budget
   generic.py        -> CSS-driven parse_listing / parse_detail + server extraction
