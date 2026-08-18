@@ -1,23 +1,16 @@
-"""Chinese CMS video source provider — direct m3u8/mp4 links from MacCMS APIs.
+"""Direct m3u8 video source provider — Chinese CMS APIs.
 
-Uses the Apple CMS V10 compatible API format used by Chinese video resource
-sites. These sites host movies/series with direct m3u8 HLS streams that
-ExoPlayer can play without proxy.
+MacCMS V10 API format: GET {base}/api.php/provide/vod/?ac=detail&wd={query}
+Returns JSON with direct m3u8 HLS links — no embed/proxy needed.
+ExoPlayer plays these natively.
 
-API format:
-    GET {base}/api.php/provide/vod/?ac=detail&wd={search_term}
-
-Returns JSON:
-    {"total": N, "list": [{"vod_id", "vod_name", "vod_year", "vod_pic",
-     "vod_play_from": "hnm3u8$$$hnyun",
-     "vod_play_url": "EP1$url1#EP2$url2$$$EP1$url3"}]}
-
-vod_play_from and vod_play_url are parallel: each $$$ segment is a
-different CDN/player source. Within a segment, episodes are separated
-by # and each episode is name$url.
-
-The hnm3u8 sources serve direct m3u8 playlists with AES-128 encryption
-that ExoPlayer handles natively.
+Tested working sources (2026-08):
+    - hongniuzy2.com   → hn.bfvvs.com
+    - jinyingzy.com    → hd.ijycnd.com
+    - ikunzy.com       → bfikuncdn.com / kkzycdn.com
+    - 360zy.com        → vod1/vod2.maowushi.com
+    - guangsu (光速)    → v.gsuus.com
+    - subo (速播)       → play.xluuss.com
 """
 
 from __future__ import annotations
@@ -47,23 +40,45 @@ _DEFAULT_CONFIG = {
         "enabled": True,
         "sources": [
             {
+                "name": "ikunzy",
+                "base_url": "https://ikunzy.com",
+                "api_path": "/api.php/provide/vod/",
+                "timeout": 10,
+            },
+            {
+                "name": "360zy",
+                "base_url": "https://360zy.com",
+                "api_path": "/api.php/provide/vod/",
+                "timeout": 10,
+            },
+            {
                 "name": "hongniuzy2",
                 "base_url": "https://hongniuzy2.com",
                 "api_path": "/api.php/provide/vod/",
-                "prefer_formats": ["hnm3u8"],
                 "timeout": 10,
             },
             {
                 "name": "jinyingzy",
                 "base_url": "http://jinyingzy.com",
                 "api_path": "/api.php/provide/vod/",
-                "prefer_formats": ["jinyingm3u8"],
+                "timeout": 10,
+            },
+            {
+                "name": "guangsu",
+                "base_url": "https://api.guangsuapi.com",
+                "api_path": "/api.php/provide/vod/",
+                "timeout": 10,
+            },
+            {
+                "name": "subo",
+                "base_url": "https://subocaiji.com",
+                "api_path": "/api.php/provide/vod/",
                 "timeout": 10,
             },
         ],
         "tmdb_languages": ["zh-CN", "zh-TW", "zh"],
-        "timeout": 12,
-        "max_servers": 6,
+        "timeout": 15,
+        "max_servers": 12,
         "label": "سورس صيني",
         "cache_ttl": 3600,
         "verify_live": False,
