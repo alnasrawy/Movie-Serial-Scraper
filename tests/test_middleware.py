@@ -825,83 +825,13 @@ def test_stream_rewrites_dash_manifest(monkeypatch):
     assert "v$Number$.m4s" in r.text
 
 
-def test_watch_adds_primetv_foreign_servers(monkeypatch):
-    """/watch resolves primetv engine/easyplex streams and proxies them."""
-    from fastapi.testclient import TestClient
-
-    from middleware import primetv
-    from middleware import server
-
-    def fake_tmdb_title(tmdb_id, key=None, media_type="movie"):
-        return {
-            "tmdb_id": str(tmdb_id),
-            "media_type": "movie",
-            "title": "استهلال",
-            "original_title": "Inception",
-            "overview": "",
-            "year": 2010,
-        }
-
-    def fake_scrape_all(query, sites):
-        return []
-
-    async def fake_resolve_embed(url, referer=None):
-        return {"sid": f"sid-{hash(url)}", "kind": "hls", "url": "https://cdn.test/master.m3u8"}
-
-    class _Res:
-        servers = [
-            {
-                "url": "https://sacdn.hakunaymatata.com/dash/6207982430134357800_1_1_1080/index_web.mpd",
-                "kind": "dash",
-                "quality": 1080,
-                "cookie": "CloudFront-Policy=eyJZ;",
-                "referer": "https://primeott.sytes.net/engine/",
-                "user_agent": "",
-            }
-        ]
-
-    captured = {}
-
-    def fake_resolve(tmdb_id, kind, title="", year=None, season=None, episode=None):
-        captured["args"] = (tmdb_id, kind, title, year)
-        return _Res()
-
-    monkeypatch.setenv("TMDB_API_KEY", "test-key")
-    monkeypatch.setattr("scraper.tmdb.tmdb_title", fake_tmdb_title)
-    monkeypatch.setattr(server, "_scrape_all", fake_scrape_all)
-    monkeypatch.setattr(server, "_resolve_embed", fake_resolve_embed)
-    monkeypatch.setattr(primetv, "is_enabled", lambda: True)
-    monkeypatch.setattr(primetv, "resolve", fake_resolve)
-    monkeypatch.setattr(primetv, "_cfg", lambda: {"label": "سيرفر برايم"})
-
-    server.http_sessions.clear()
-    server._watch_cache.clear()
-    try:
-        c = TestClient(server.app)
-        r = c.post("/watch", json={"tmdb_id": 27205, "type": "movie"})
-        assert r.status_code == 200
-        data = r.json()
-        pt = [s for s in data["servers"] if s["site"] == "primetv"]
-        assert len(pt) == 1
-        assert pt[0]["name"] == "سيرفر برايم 1"
-        assert pt[0]["kind"] == "dash"
-        assert pt[0]["proxy_url"].startswith("http://testserver/stream/")
-        assert ".mpd?" in pt[0]["proxy_url"]
-        sessions = [ep for ep in server.http_sessions.values() if ep.get("kind") == "primetv"]
-        assert len(sessions) == 1
-        assert sessions[0]["cookie"] == "CloudFront-Policy=eyJZ;"
-        assert captured["args"] == (27205, "movie", "Inception", 2010)
-    finally:
-        server.http_sessions.clear()
-
-
 def test_watch_movie_defaults_to_our_arabic_sites(monkeypatch):
     """A movie with no `sites` scrapes every configured Arabic site."""
     from fastapi.testclient import TestClient
 
     from middleware import server
-    from middleware import primetv, subtitles
-    from scraper.sites import available_sites
+    from middleware import subtitles
+    from scraper.sites import available_sites, config_dir
 
     calls = {"sites": None}
 
@@ -912,15 +842,6 @@ def test_watch_movie_defaults_to_our_arabic_sites(monkeypatch):
     async def fake_resolve_embed(url, referer=None):
         return {"sid": "s", "kind": "hls", "url": "https://cdn.test/master.m3u8"}
 
-    class _Res:
-        servers = [
-            {"url": "https://cdn.test/master.m3u8", "kind": "hls", "quality": 720,
-             "cookie": "", "referer": "", "user_agent": ""}
-        ]
-
-    def fake_resolve(tmdb_id, kind, title="", year=None, season=None, episode=None):
-        return _Res()
-
     def fake_tmdb_title(tmdb_id, key=None, media_type="movie"):
         return {"tmdb_id": str(tmdb_id), "media_type": "movie", "title": "استهلال",
                 "original_title": "Inception", "overview": "", "year": 2010}
@@ -929,9 +850,6 @@ def test_watch_movie_defaults_to_our_arabic_sites(monkeypatch):
     monkeypatch.setattr("scraper.tmdb.tmdb_title", fake_tmdb_title)
     monkeypatch.setattr(server, "_scrape_all", fake_scrape_all)
     monkeypatch.setattr(server, "_resolve_embed", fake_resolve_embed)
-    monkeypatch.setattr(primetv, "is_enabled", lambda: True)
-    monkeypatch.setattr(primetv, "resolve", fake_resolve)
-    monkeypatch.setattr(primetv, "_cfg", lambda: {"label": "سيرفر برايم"})
     monkeypatch.setattr(subtitles, "is_enabled", lambda: False)
     monkeypatch.setattr(server, "_tmdb_external_imdb", lambda tmdb_id, media_type: "")
 
@@ -942,11 +860,11 @@ def test_watch_movie_defaults_to_our_arabic_sites(monkeypatch):
         r = c.post("/watch", json={"tmdb_id": 27205, "type": "movie"})
         assert r.status_code == 200
         # our own Arabic engine runs by default for movies (all sites)
-        assert calls["sites"] == [s for s in available_sites() if s != "primetv"]
+        assert calls["sites"] == available_sites(config_dir())
 
         # TV keeps the fast path: no Arabic scrape unless sites are explicit
         r3 = c.post("/watch", json={"tmdb_id": 1396, "type": "tv", "season": 1, "episode": 1})
         assert r3.status_code == 200
-        assert calls["sites"] == [s for s in available_sites() if s != "primetv"]  # unchanged -> no tv scrape
+        assert calls["sites"] == available_sites(config_dir())  # unchanged -> no tv scrape
     finally:
         server.http_sessions.clear()

@@ -6,7 +6,7 @@ needs to work on this project safely and effectively.
 ## Project in one paragraph
 
 A Python backend that scrapes movie/series watch servers from Arabic streaming
-sites (**akwams** and **egydead**, both config-driven via JSON) and resolves
+sites (**akwams** and **larroza**, both config-driven via JSON) and resolves
 the hosts' JavaScript-protected embed pages into a playable **HLS stream** for a
 **native player** (ExoPlayer / VLC). The scraping engine is generic (CSS
 selectors from config files — no per-site code). The `middleware/` package runs
@@ -26,17 +26,21 @@ python run.py --final "inception"            # روابط نهائية + برو�
 
 # --- root project (development + tests) ---
 pip install -r requirements-dev.txt          # only for running tests
-python -m pytest tests -q                     # 91 tests, no network needed
+python -m pytest tests -q                     # 74 tests, no network needed
 ```
 
 ## Architecture
 
-The standalone deployment lives in `film_scraper/` — copy that folder to any
-VPS and run `python run.py --serve`. The root project is for development/tests.
+`film_scraper/` is the **single source of truth** — the standalone deployment
+folder, and also what the tests import (conftest puts `film_scraper/` first on
+sys.path, so `import scraper`/`import middleware` resolve there). Copy the
+folder to any VPS and run `python run.py --serve`. There are no duplicate
+root-level `scraper/`/`middleware/`/`configs/` anymore.
 
 ```
 film_scraper/
   run.py             -> Single entry point: --list, --serve, --query, --final, --direct
+                       (main(argv) is testable; tests call it directly)
   requirements.txt   -> Deployment dependencies
   configs/*.json      -> SiteConfig (CSS selectors, custom hooks). Sites are data.
   scraper/
@@ -50,6 +54,7 @@ film_scraper/
   tmdb.py           -> TMDB id -> Arabic search title + original_title + year
                        (needs 32-char v3 API key)
 middleware/
+  envfile.py        -> dependency-free .env loader (load_env()) — no dotenv package
   http_resolver.py  -> PURE-HTTP resolver (no browser): GET embed -> unpack_packer
                        -> .urlset/master.txt -> HLS with Referer. Cheap/fast path.
   subtitles.py      -> OpenSubtitles legacy API (rest.opensubtitles.org) keyed
@@ -57,15 +62,6 @@ middleware/
                        -> download .gz -> decode (cp1256/utf-8) -> srt->vtt.
                        Search is cached 30 min; /subtitle does a targeted
                        `sublanguageid-<lang>` search if the language is missing.
-  primetv.py        -> foreign provider (PrimeTV engine + easyplex) with NO
-                       browser: GET engine.php?action=play&tmdb=..&type=movie|tv
-                       [&title=&year=&se=&ep=] -> signed CDN URLs (may be DASH
-                       .mpd + CloudFront signed cookie, bound to OUR IP -> play
-                       through /stream). Second source: easyplex JSON API
-                       {easyplex_base}/sources/movie|tv?tmdb_id=..&title=.. ->
-                       videos (resolved:true = direct mp4/hls, else embed pages
-                       whose HTML is scanned with the app's EmbedLinkExtractor
-                       regexes). Resolve cached `cache_ttl` seconds.
   player.py         -> BrowserManager: long-lived Chromium, per-embed sessions,
                        ctx.request fetch (shares cookies, avoids headless TLS headers),
                        fetch() replays the embed Referer, refresh_session() mints new tokens
@@ -73,11 +69,10 @@ middleware/
                        main-app contract), POST /direct (raw CDN m3u8 URLs, no
                        proxy/session), POST /resolve, GET /stream (rewrites m3u8
                        AND DASH MPDs, forwards the session Cookie header, strips
-                       PNG-wrapped TS, auto-refresh on 401/403 including a primetv
-                       re-resolve), GET /subtitle (imdb_id + lang -> WebVTT),
-                       /health, GET / (in-browser tester
-                       page, middleware/static/index.html), and the TMDB browse
-                       endpoints the Android app uses: GET /tmdb/popular?type=movie|tv,
+                       PNG-wrapped TS, auto-refresh on 401/403), GET /subtitle
+                       (imdb_id + lang -> WebVTT), /health, GET / (in-browser
+                       tester page, middleware/static/index.html), and the TMDB
+                       browse endpoints the Android app uses: GET /tmdb/popular?type=movie|tv,
                        GET /tmdb/trending?time=week|day, GET /tmdb/search?q=...
                        (all return {page, total_pages, items:[{tmdb_id, media_type,
                        title, original_title, overview, poster, vote_average}]} with
@@ -86,15 +81,12 @@ middleware/
                        Hybrid resolution: HTTP-first, browser only when BROWSER_ENABLED=1.
 Dockerfile, Dockerfile.lite, docker-compose.yml, render.yaml, .env.example, DEPLOYMENT.md
   -> run the backend on a VPS 24/7; the app calls http://IP:8000/watch.
-     Dockerfile.lite = pure HTTP (free Render tier, ~100MB). Dockerfile = browser (VPS).
-cli.py              -> argparse CLI wrapping the scraper
-direct_links.py     -> ONE command that prints DIRECT m3u8 media URLs (no proxy):
-                       scrape -> resolve_http -> verified CDN links playable straight
-                       in ExoPlayer/VLC (EarnVids hls2 tokens last ~36h, no Referer).
-final_links.py      -> one command: scrape(watch_only) -> open each embed -> keep a
-                       uvicorn proxy alive -> print final http://127.0.0.1:<port>/stream? URLs
-tests/              -> 85 tests. conftest.py sets PROJECT_ROOT on sys.path and starts
-                       a local mock site (tests/mock_site.py) — no internet required.
+     Both Dockerfiles now build from film_scraper/ (they used to rely on the
+     untracked root middleware/). Dockerfile.lite = pure HTTP (free Render
+     tier, ~100MB). Dockerfile = browser (VPS).
+tests/              -> 74 tests. conftest.py puts film_scraper/ first on sys.path
+                       and starts a local mock site (tests/mock_site.py) — no
+                       internet required.
 ```
 
 ## Hard-won technical facts (do not "simplify" these away)
@@ -145,26 +137,6 @@ tests/              -> 85 tests. conftest.py sets PROJECT_ROOT on sys.path and s
     then fall back to plain requests. `search(imdb_id, lang=...)` appends
     `sublanguageid-<lang>` — `/subtitle` uses it when a language (e.g. `ara`)
     is missing from the default result window.
-- **PrimeTV provider (`primetv.py`) facts:**
-  - Engine stream `format` labels are unreliable (`.mp4` URLs sometimes labeled
-    `DASH`) — detect media kind from the URL extension in `_kind_for`
-    (`.m3u8`->hls, `.mpd`/`/manifest`->dash, else mp4).
-  - The engine's DASH TV streams come with a **CloudFront signed cookie** bound
-    to the requesting (OUR) IP. `/stream` must forward that `Cookie` on the MPD
-    AND every segment — the session stores it and `_http_headers` adds it.
-  - The engine MPD uses printf-style templates: `media="chunk-stream$RepresentationID$-$Number%05d$.m4s"`.
-    `_rewrite_mpd` stashes `$...$` tokens before urlencoding and restores them
-    so the player can still substitute `$Number$`/`$RepresentationID$` (a naive
-    urlencode turns `$` into `%24` and `%` into `%25`, silently breaking DASH
-    playback). Regression-tested in tests/test_middleware.py.
-  - The engine MPD is served with content-type `application/octet-stream` —
-    `/stream` detects DASH by the `.mpd`/`/manifest` URL suffix, not the header.
-  - Engine bcdn/easyplex media URLs carry expiring `sign`/`t` query tokens:
-    `/watch` sessions store the resolve args and `/stream` re-runs
-    `primetv.resolve` on 401/403 via `_refresh_primetv`. Do not cache resolved
-    URLs longer than `cache_ttl` (default 300s).
-  - Engine/easyplex are **third-party services** — the endpoints may change or
-    rate-limit; the provider fails soft (skips to the next server/site).
 
 ## Conventions
 
@@ -175,9 +147,8 @@ tests/              -> 85 tests. conftest.py sets PROJECT_ROOT on sys.path and s
 - UI/UX text is **Arabic**. Server names use `سيرفر {n}` / `تحميل {n}`.
 - Keep `watch_only` a first-class option everywhere (the product wants watch
   links only, no download links).
-- `final_links.py`, `direct_links.py` and `cli.py` must all keep working; they
-  share `scraper/` and `middleware/` (final_links historically broke when
-  `manager` was renamed to `get_manager()` — prefer the module-level helpers).
+- The scraper + middleware live only in `film_scraper/` — never create root
+  `scraper/`/`middleware/`/`configs/` copies again (tests resolve to film_scraper).
 
 ## Android app (android/)
 
@@ -225,6 +196,6 @@ implement, using the files above as reference:
 ## Verification
 
 - `python -m pytest tests -q` must stay green before finishing any change.
-- `python -m compileall -q scraper middleware cli.py final_links.py tools`
-- After middleware changes, run `python final_links.py "inception" --max-servers 1`
+- `python -m compileall -q film_scraper`
+- After middleware changes, run `python run.py --final "inception" --sites akwams`
   once to smoke-test a real resolve (needs the installed Chromium).

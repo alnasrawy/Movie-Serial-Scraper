@@ -254,9 +254,9 @@ async def _resolve_many(servers: list[tuple[dict, dict]], limit: int = 8,
                         enough: int = 2, timeout: float = 12.0) -> list[tuple[dict, dict, dict]]:
     """Resolve embed URLs concurrently; return as soon as we have enough hits.
 
-    PrimeTV-style latency: the whole resolve phase is capped at `timeout`
-    seconds (a hard deadline, not per-task), and we stop early once `enough`
-    links are found so one slow/timing-out embed can't hold /watch hostage.
+    The whole resolve phase is capped at `timeout` seconds (a hard deadline,
+    not per-task), and we stop early once `enough` links are found so one
+    slow/timing-out embed can't hold /watch hostage.
     """
     sem = asyncio.Semaphore(limit)
     done_results: list[tuple[dict, dict, dict]] = []
@@ -649,9 +649,9 @@ async def watch(req: WatchRequest, request: Request) -> dict:
     """
     sites = [s.strip() for s in (req.sites or []) if s.strip()]
     if not sites:
-        from scraper.sites import available_sites
+        from scraper.sites import available_sites, config_dir
 
-        sites = [name for name in available_sites() if name != "primetv"]
+        sites = available_sites(config_dir())
     if not sites and not req.tmdb_id:
         raise HTTPException(400, "Provide 'sites' or 'tmdb_id'")
 
@@ -788,14 +788,14 @@ async def watch(req: WatchRequest, request: Request) -> dict:
                 })
             return len(servers)
 
-        # Run Arabic resolve AND foreign providers (primetv/cnsource/imdb) in
-        # parallel — the total wait is max(...), not the sum.
+        # Run Arabic resolve AND the IMDb/subtitle lookup in parallel — the
+        # total wait is max(...), not the sum.
         build_task = asyncio.create_task(build_arabic())
         foreign_task = asyncio.create_task(_add_foreign_servers(req, base, servers))
         await build_task
         imdb_id, subtitles_list = await foreign_task
         _debug("حل", f"اكتمل الحل: {len(servers)} سيرفر في {time.monotonic()-t1:.1f}s")
-        _debug("حل", f"المصادر الخارجية (برايم/صيني/IMDb) + المجموع في {time.monotonic()-t0:.1f}s")
+        _debug("حل", f"المصادر الخارجية (IMDb) + المجموع في {time.monotonic()-t0:.1f}s")
 
         arabic_n = 0
         for sv in servers:
@@ -830,56 +830,18 @@ def _prune_sessions(max_age: float = 86400.0) -> None:
         http_sessions.pop(sid, None)
 
 
-async def _refresh_primetv(http_ep: dict) -> tuple[str, bool]:
-    """Re-resolve a primetv session's stream and return a fresh URL."""
-    from . import primetv
-
-    provider = http_ep.get("provider") or {}
-    idx = int(http_ep.get("idx") or 0)
-    try:
-        res = await asyncio.to_thread(
-            primetv.resolve,
-            provider.get("tmdb_id"),
-            provider.get("type") or "movie",
-            title=provider.get("title") or "",
-            year=provider.get("year"),
-            season=provider.get("season"),
-            episode=provider.get("episode"),
-        )
-    except Exception as exc:
-        log.warning("primetv refresh failed: %s", exc)
-        return http_ep.get("url") or "", False
-    servers = res.servers
-    if idx >= len(servers):
-        return http_ep.get("url") or "", False
-    sv = servers[idx]
-    http_ep["url"] = sv["url"]
-    http_ep["referer"] = sv["referer"] or http_ep.get("referer", "")
-    if sv.get("cookie"):
-        http_ep["cookie"] = sv["cookie"]
-    return sv["url"], True
-
-
 async def _add_foreign_servers(req: WatchRequest, base: str, servers: list[dict]) -> tuple[str, list[dict]]:
-    """Resolve foreign (primetv/easyplex) streams for a TMDB id and append proxied servers.
+    """Look up the IMDb external id and subtitle languages for a TMDB id.
 
-    Runs in parallel with the TMDB external-id lookup (a few seconds of HTTP);
-    the subtitle language list is fetched once afterwards.
+    Runs in parallel with the Arabic resolve; the subtitle language list is
+    fetched once afterwards.
 
     Returns (imdb_id, subtitle languages) — the former is needed by the app to
     fetch subtitles later via /subtitle.
     """
     if not req.tmdb_id:
         return "", []
-    from scraper.tmdb import api_key, tmdb_title
-    from . import primetv
     from . import subtitles as subs
-
-    # The PrimeTV engine refuses TV lookups without a season/episode (it falls
-    # into a per-IP "verification code" flow that 429s). Default to S1E1 when
-    # the caller didn't pick an episode so series still resolve.
-    season = req.season if req.season is not None else (1 if req.type == "tv" else None)
-    episode = req.episode if req.episode is not None else (1 if req.type == "tv" else None)
 
     async def job_imdb() -> str:
         if not subs.is_enabled():
@@ -890,91 +852,7 @@ async def _add_foreign_servers(req: WatchRequest, base: str, servers: list[dict]
             log.warning("tmdb external_ids failed: %s", exc)
             return ""
 
-    async def job_primetv() -> list[dict]:
-        if not primetv.is_enabled():
-            return []
-        _debug("برايم", f"بحث عن «{req.tmdb_id}» في برايم TV ...")
-        key = api_key()
-        info = {}
-        if key:
-            try:
-                info = await asyncio.to_thread(tmdb_title, req.tmdb_id, key=key, media_type=req.type)
-            except Exception as exc:
-                log.warning("tmdb_title for primetv failed: %s", exc)
-        ptitle = (info.get("original_title") or info.get("title") or "").strip()
-        res = await asyncio.to_thread(
-            primetv.resolve,
-            req.tmdb_id,
-            req.type,
-            title=ptitle,
-            year=info.get("year"),
-            season=season,
-            episode=episode,
-        )
-        _debug("برايم", f"برايم TV: {len(res.servers)} رابط")
-        label = primetv._cfg().get("label", "سيرفر برايم")
-        provider_args = {
-            "tmdb_id": req.tmdb_id,
-            "type": req.type,
-            "title": ptitle,
-            "year": info.get("year"),
-            "season": season,
-            "episode": episode,
-        }
-        built = []
-        for i, sv in enumerate(res.servers, 1):
-            sid = _new_sid()
-            http_sessions[sid] = {
-                "url": sv["url"],
-                "referer": sv["referer"] or primetv._cfg().get("engine_base_url", ""),
-                "cookie": sv["cookie"] or "",
-                "user_agent": sv["user_agent"] or "",
-                "kind": "primetv",
-                "idx": i - 1,
-                "provider": provider_args,
-                "created": time.monotonic(),
-            }
-            built.append({
-                "site": "primetv",
-                "name": "{} {}".format(label, i),
-                "kind": sv["kind"],
-                "quality": sv["quality"],
-                "proxy_url": base + _proxy_url(sid, sv["url"], ext=_ext_for(sv["kind"])),
-                "foreign": True,
-            })
-        return built
-
-    async def job_cnsource() -> list[dict]:
-        from . import cnsource
-        if not cnsource.is_enabled():
-            return []
-        _debug("صيني", f"بحث عن «{req.tmdb_id}» في المصادر الصينية ...")
-        res = await asyncio.to_thread(
-            cnsource.resolve,
-            req.tmdb_id,
-            req.type,
-            season=season,
-            episode=episode,
-        )
-        _debug("صيني", f"المصادر الصينية: {len(res.servers)} رابط")
-        label = cnsource._cfg().get("label", "سورس صيني")
-        built = []
-        for i, sv in enumerate(res.servers, 1):
-            built.append({
-                "site": "cnsource",
-                "name": "{} {}".format(label, i),
-                "kind": sv["kind"],
-                "quality": sv.get("quality", 0),
-                "proxy_url": sv["url"],
-                "foreign": True,
-            })
-        return built
-
-    ext_imdb, primetv_servers, cnsource_servers = await asyncio.gather(
-        job_imdb(), job_primetv(), job_cnsource()
-    )
-
-    imdb_id = ext_imdb or ""
+    imdb_id = await job_imdb()
     sub_langs: list[dict] = []
     if imdb_id and subs.is_enabled():
         try:
@@ -983,12 +861,7 @@ async def _add_foreign_servers(req: WatchRequest, base: str, servers: list[dict]
         except Exception as exc:
             log.warning("subtitle search failed: %s", exc)
 
-    for s in primetv_servers:
-        servers.append(s)
-    for s in cnsource_servers:
-        servers.append(s)
-
-    return imdb_id, sub_langs
+    return imdb_id or "", sub_langs
 
 
 # Same cache namespace pattern but for /direct (raw media URLs, no proxy).
@@ -1180,16 +1053,11 @@ async def stream(sid: str = Query(""), url: str = Query(...), ref: str = "", sit
             new_url = getattr(browser_session, "new_url", url)
         elif http_ep:
             # HTTP sessions: re-resolve the embed and mint a fresh URL.
-            from . import primetv
-
-            if http_ep.get("kind") == "primetv":
-                new_url, refreshed = await _refresh_primetv(http_ep)
-            else:
-                re_got = await asyncio.to_thread(resolve_http, http_ep["referer"], None)
-                if re_got:
-                    http_ep["url"] = re_got["url"]
-                    new_url = re_got["url"]
-                    refreshed = True
+            re_got = await asyncio.to_thread(resolve_http, http_ep["referer"], None)
+            if re_got:
+                http_ep["url"] = re_got["url"]
+                new_url = re_got["url"]
+                refreshed = True
             if refreshed:
                 http_ep["url"] = new_url
             http_ep["last_refresh"] = time.monotonic()

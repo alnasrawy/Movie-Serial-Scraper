@@ -8,9 +8,9 @@ from pathlib import Path
 
 def _run_cli(monkeypatch, tmp_path, *args):
     monkeypatch.chdir(tmp_path)
-    import cli
+    import run
 
-    return cli.main(list(args))
+    return run.main(list(args))
 
 
 def test_cli_search_end_to_end(monkeypatch, tmp_path, mock_site):
@@ -19,12 +19,10 @@ def test_cli_search_end_to_end(monkeypatch, tmp_path, mock_site):
     code = _run_cli(
         monkeypatch,
         tmp_path,
-        "--site", "mock",
+        "--sites", "mock",
         "--query", "inception",
         "--format", "json",
         "--out", str(out),
-        "--no-details",
-        "--delay", "0",
     )
     assert code == 0
     assert out.exists()
@@ -40,12 +38,11 @@ def test_cli_watch_only_drops_downloads(monkeypatch, tmp_path, mock_site):
     code = _run_cli(
         monkeypatch,
         tmp_path,
-        "--site", "mock",
+        "--sites", "mock",
         "--query", "inception",
         "--format", "json",
         "--out", str(out),
         "--watch-only",
-        "--delay", "0",
     )
     assert code == 0
     items = json.loads(out.read_text(encoding="utf-8"))
@@ -60,5 +57,5 @@ def test_cli_list_sites(monkeypatch, tmp_path, mock_site, capsys):
 
 
 def test_cli_unknown_site(monkeypatch, tmp_path, capsys):
-    code = _run_cli(monkeypatch, tmp_path, "--site", "does-not-exist", "--query", "x")
+    code = _run_cli(monkeypatch, tmp_path, "--sites", "does-not-exist", "--query", "x")
     assert code == 1

@@ -19,6 +19,11 @@ _sites_cache: dict[str, tuple[float, list[SiteConfig]]] = {}
 _SITES_CACHE_TTL = float(os.environ.get("SITES_CACHE_TTL", "60"))
 
 
+def config_dir() -> Path:
+    """Absolute path to the site configs directory (package-relative)."""
+    return Path(__file__).resolve().parent.parent / "configs"
+
+
 def _parse_config(raw: dict[str, Any]) -> SiteConfig:
     fields = dict(raw.get("fields", {}))
     if raw.get("item_selector") and raw.get("detail_url_selector"):
@@ -49,8 +54,8 @@ def load_config(path: str | Path) -> SiteConfig:
 def load_sites(directory: str | Path = "configs") -> list[SiteConfig]:
     """Load every *.json config from a directory.
 
-    ``providers.json`` is the middleware's provider bundle (primetv,
-    subtitles, ...), not a site config — it is skipped.
+    ``providers.json`` is the middleware's provider bundle (subtitles, ...),
+    not a site config — it is skipped.
 
     Results are cached in-memory for SITES_CACHE_TTL seconds to avoid
     re-reading JSON files on every call.

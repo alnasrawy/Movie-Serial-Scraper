@@ -11,6 +11,6 @@ services:
       TMDB_API_KEY: ${TMDB_API_KEY:-}
     volumes:
       # site settings live on the host so the app's config edits persist
-      - ./configs:/app/configs
+      - ./film_scraper/configs:/app/configs
     # optional: cap memory so the headless browser cannot OOM the server
     #mem_limit: 2g

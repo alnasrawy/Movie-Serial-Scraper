@@ -56,6 +56,7 @@ def cmd_list():
         print(f"  - {s}")
     if not sites:
         print("  (لا يوجد مواقع. أضف ملف JSON في configs/)")
+    return 0
 
 
 def cmd_serve(args):
@@ -63,6 +64,7 @@ def cmd_serve(args):
     port = int(os.environ.get("PORT") or os.environ.get("MIDDLEWARE_PORT") or args.port)
     print(f"تشغيل الخادم على http://0.0.0.0:{port} ...")
     uvicorn.run(app, host="0.0.0.0", port=port, log_level="info")
+    return 0
 
 
 def cmd_scrape(args):
@@ -190,7 +192,7 @@ def cmd_direct(args):
     return 0 if results else 1
 
 
-def main():
+def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
         description="movies_serial_scraping — سكراب + خادم + روابط مباشرة"
     )
@@ -208,7 +210,7 @@ def main():
     parser.add_argument("--out", help="مسار ملف الإخراج")
     parser.add_argument("--format", choices=["json", "csv"], default="json")
     parser.add_argument("-v", "--verbose", action="store_true")
-    args = parser.parse_args()
+    args = parser.parse_args(argv)
 
     logging.basicConfig(
         level=logging.DEBUG if args.verbose else logging.INFO,
@@ -216,18 +218,19 @@ def main():
     )
 
     if args.list:
-        cmd_list()
+        return cmd_list()
     elif args.serve:
-        cmd_serve(args)
+        return cmd_serve(args)
     elif args.final:
-        sys.exit(cmd_final(args))
+        return cmd_final(args)
     elif args.direct:
-        sys.exit(cmd_direct(args))
+        return cmd_direct(args)
     elif args.query or args.tmdb:
-        sys.exit(cmd_scrape(args))
+        return cmd_scrape(args)
     else:
         parser.print_help()
+        return 0
 
 
 if __name__ == "__main__":
-    main()
+    sys.exit(main())

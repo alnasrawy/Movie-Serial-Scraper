@@ -8,7 +8,19 @@ from pathlib import Path
 import pytest
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
+FILM_SCRAPER = PROJECT_ROOT / "film_scraper"
 sys.path.insert(0, str(PROJECT_ROOT))
+sys.path.insert(0, str(FILM_SCRAPER))
+
+
+def pytest_configure(config):
+    """Keep film_scraper/ first on sys.path (pytest re-inserts the rootdir)."""
+    fs = str(FILM_SCRAPER)
+    try:
+        sys.path.remove(fs)
+    except ValueError:
+        pass
+    sys.path.insert(0, fs)
 
 
 @pytest.fixture

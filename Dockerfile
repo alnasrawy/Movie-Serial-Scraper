@@ -14,11 +14,11 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     libxcb1 libxext6 libxi6 libxtst6 fonts-liberation \
     && rm -rf /var/lib/apt/lists/*
 
-COPY requirements.txt .
+COPY film_scraper/requirements.txt .
 RUN pip install -r requirements.txt \
     && python -m playwright install chromium
 
-COPY . .
+COPY film_scraper/ .
 
 EXPOSE 8000
 

@@ -13,7 +13,7 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
 COPY requirements-lite.txt .
 RUN pip install -r requirements-lite.txt
 
-COPY . .
+COPY film_scraper/ .
 
 EXPOSE 8000
 

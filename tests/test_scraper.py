@@ -13,6 +13,8 @@ from scraper.sites import load_sites, find_config  # noqa: E402
 from scraper.storage import to_csv, to_json  # noqa: E402
 from scraper.base import SiteConfig  # noqa: E402
 
+_CONFIGS = str(Path(__file__).resolve().parents[1] / "film_scraper" / "configs")
+
 
 HTML = """
 <html><body>
@@ -332,16 +334,16 @@ def test_scrape_max_items_caps_detail_fetches():
 
 
 def test_sites_load_and_find():
-    configs = load_sites("configs")
+    configs = load_sites(_CONFIGS)
     names = [c.name for c in configs]
     assert "akwams" in names
-    assert "egydead" in names
-    assert find_config("akwams") is not None
-    assert find_config("ak") is not None  # prefix match
+    assert "larroza" in names
+    assert find_config("akwams", _CONFIGS) is not None
+    assert find_config("ak", _CONFIGS) is not None  # prefix match
 
 
 def test_akwams_config_loads():
-    config = find_config("akwams")
+    config = find_config("akwams", _CONFIGS)
     assert config is not None
     assert config.search_url == "https://akwams.org/?s={query}"
     assert config.item_selector == "a.movie__block"
