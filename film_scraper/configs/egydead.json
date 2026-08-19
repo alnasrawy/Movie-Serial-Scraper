@@ -1,5 +1,6 @@
 {
   "name": "egydead",
+  "enabled": false,
   "base_url": "https://tv10.egydead.live/",
   "search_url": "https://tv10.egydead.live?s={query}",
   "item_selector": "li.movieItem",

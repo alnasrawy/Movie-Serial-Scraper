@@ -237,53 +237,67 @@ def _verify_live(url: str, timeout: float = 5.0) -> bool:
         return False
 
 
+def _search_one(query: str, src: dict, timeout: float) -> list[dict]:
+    base = src.get("base_url", "").rstrip("/")
+    api_path = src.get("api_path", "/api.php/provide/vod/")
+    src_timeout = float(src.get("timeout", timeout))
+    if not base:
+        return []
+    url = f"{base}{api_path}?ac=detail&wd={quote_plus(query)}"
+    try:
+        resp = _get(url, src_timeout, referer=base + "/")
+        if resp.status_code >= 400:
+            log.info("cnsource %s failed: %s", src.get("name"), resp.status_code)
+            return []
+        data = resp.json()
+    except Exception as exc:
+        log.warning("cnsource %s error: %s", src.get("name"), exc)
+        return []
+    items = data.get("list") or []
+    if not items:
+        return []
+    src_servers = []
+    for item in items[:3]:
+        m3u8_urls = _extract_unique_m3u8(item.get("vod_play_url") or "")
+        for m3u8 in m3u8_urls[:2]:
+            src_servers.append({
+                "url": m3u8,
+                "kind": "hls",
+                "quality": 0,
+                "source": f"cn_{src.get('name', 'unknown')}",
+                "source_name": "hnm3u8",
+            })
+    return src_servers
+
+
 def search(
     query: str,
     sources: list[dict] | None = None,
     prefer_formats: list[str] | None = None,
     timeout: float = 10.0,
 ) -> CnSourceResult:
-    """Search Chinese CMS sources and return direct m3u8/mp4 links."""
+    """Search Chinese CMS sources and return direct m3u8/mp4 links.
+
+    All sources are queried in parallel so the slowest one alone decides the
+    wall-clock time (6 sources used to run sequentially = up to 60s delay).
+    """
+    import concurrent.futures
+
     cfg = _cfg()
     sources = sources or cfg.get("sources", [])
     prefer = prefer_formats or []
     result = CnSourceResult()
 
     per_source: list[list[dict]] = []
-    for src in sources:
-        base = src.get("base_url", "").rstrip("/")
-        api_path = src.get("api_path", "/api.php/provide/vod/")
-        src_timeout = float(src.get("timeout", timeout))
-        if not base:
-            continue
-
-        url = f"{base}{api_path}?ac=detail&wd={quote_plus(query)}"
-        try:
-            resp = _get(url, src_timeout, referer=base + "/")
-            if resp.status_code >= 400:
-                log.info("cnsource %s failed: %s", src.get("name"), resp.status_code)
-                continue
-            data = resp.json()
-        except Exception as exc:
-            log.warning("cnsource %s error: %s", src.get("name"), exc)
-            continue
-
-        items = data.get("list") or []
-        if not items:
-            continue
-
-        src_servers = []
-        for item in items[:3]:
-            m3u8_urls = _extract_unique_m3u8(item.get("vod_play_url") or "")
-            for m3u8 in m3u8_urls[:2]:
-                src_servers.append({
-                    "url": m3u8,
-                    "kind": "hls",
-                    "quality": 0,
-                    "source": f"cn_{src.get('name', 'unknown')}",
-                    "source_name": "hnm3u8",
-                })
-        per_source.append(src_servers)
+    workers = min(6, len(sources) or 1)
+    with concurrent.futures.ThreadPoolExecutor(max_workers=workers) as pool:
+        futures = {pool.submit(_search_one, query, src, timeout): src for src in sources}
+        for fut in concurrent.futures.as_completed(futures):
+            src = futures[fut]
+            got = fut.result()
+            if got:
+                log.info("cnsource %s: %d links", src.get("name"), len(got))
+            per_source.append(got)
 
     seen_urls: set[str] = set()
     deduped = []
@@ -296,6 +310,7 @@ def search(
 
     max_servers = int(cfg.get("max_servers", 12))
     result.servers = deduped[:max_servers]
+    return result
     return result
 
 

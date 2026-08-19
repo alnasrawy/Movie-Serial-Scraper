@@ -61,6 +61,24 @@ def _http_hopeless(embed_url: str) -> bool:
     return any(frag in netloc for frag in _HTTP_UNRESOLVABLE)
 
 
+# Hosts that can't be resolved even with a real browser: mixdrop (reCAPTCHA),
+# playmogo/dsvplay (never start media), koramaup (obfuscated JS), minochinos
+# (no packer). Distinct from _HTTP_UNRESOLVABLE, which lists HTTP-only hosts
+# that the browser CAN resolve (vibuxer/hgcloud/okru).
+_BROWSER_HOPELESS = (
+    "mixdrop",
+    "playmogo",
+    "dsvplay",
+    "koramaup",
+    "minochinos",
+)
+
+
+def _browser_hopeless(embed_url: str) -> bool:
+    netloc = urlparse(embed_url).netloc.lower()
+    return any(frag in netloc for frag in _BROWSER_HOPELESS)
+
+
 def _kind_of(url: str) -> str:
     low = url.lower()
     if any(k in low for k in (".m3u8", ".txt", ".urlset")) and (

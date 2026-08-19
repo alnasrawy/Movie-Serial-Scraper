@@ -34,6 +34,10 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, Response, StreamingResponse
 from pydantic import BaseModel
 
+from .envfile import load_env
+
+load_env()
+
 from .http_resolver import resolve_http
 
 log = logging.getLogger(__name__)
@@ -49,6 +53,32 @@ app.add_middleware(
 BROWSER_ENABLED = os.environ.get("BROWSER_ENABLED", "1").lower() in ("1", "true", "yes", "on")
 
 _manager = None
+
+# Live debug log ring buffer — the last _DEBUG_LIMIT entries are served at /logs
+# and rendered live at /debug, so you can watch what the server is doing.
+_DEBUG_LIMIT = 500
+_debug_log: list[dict] = []
+_debug_lock = asyncio.Lock()
+
+
+def _debug(step: str, message: str, **extra) -> None:
+    entry = {
+        "t": time.strftime("%H:%M:%S"),
+        "ms": int((time.monotonic() % 60) * 1000),
+        "step": step,
+        "msg": message,
+        **extra,
+    }
+    log.info("[%s] %s", step, message)
+    if _debug_lock.locked():
+        _debug_log.append(entry)
+        if len(_debug_log) > _DEBUG_LIMIT:
+            del _debug_log[: len(_debug_log) - _DEBUG_LIMIT]
+    else:
+        # Common path: keep it cheap and avoid awaiting a lock for every log.
+        _debug_log.append(entry)
+        if len(_debug_log) > _DEBUG_LIMIT:
+            del _debug_log[: len(_debug_log) - _DEBUG_LIMIT]
 
 
 def get_manager():
@@ -209,32 +239,72 @@ def _scrape_all(query: str, sites: list[str]) -> list[dict]:
     import concurrent.futures
 
     items: list[dict] = []
+    _debug("حفر", f"بحث «{query}» في {len(sites)} مواقع")
     with concurrent.futures.ThreadPoolExecutor(max_workers=max(1, len(sites))) as pool:
-        futures = [pool.submit(_scrape_site, name, query) for name in sites]
+        futures = {pool.submit(_scrape_site, name, query): name for name in sites}
         for fut in concurrent.futures.as_completed(futures):
-            items.extend(fut.result())
+            name = futures[fut]
+            got = fut.result()
+            _debug("حفر", f"{name}: {len(got)} نتيجة")
+            items.extend(got)
     return items
 
 
-async def _resolve_many(servers: list[tuple[dict, dict]], limit: int = 8) -> list[tuple[dict, dict, dict]]:
-    """Resolve embed URLs concurrently, with a concurrency cap."""
+async def _resolve_many(servers: list[tuple[dict, dict]], limit: int = 8,
+                        enough: int = 2, timeout: float = 12.0) -> list[tuple[dict, dict, dict]]:
+    """Resolve embed URLs concurrently; return as soon as we have enough hits.
+
+    PrimeTV-style latency: the whole resolve phase is capped at `timeout`
+    seconds (a hard deadline, not per-task), and we stop early once `enough`
+    links are found so one slow/timing-out embed can't hold /watch hostage.
+    """
     sem = asyncio.Semaphore(limit)
+    done_results: list[tuple[dict, dict, dict]] = []
 
     async def one(item: dict, sv: dict) -> tuple[dict, dict, dict]:
         async with sem:
+            host = (sv.get("url") or "").split("/")[2] if sv.get("url") else "?"
+            _debug("حل", f"محاولة حل {host} ...")
             try:
                 res = await asyncio.wait_for(
                     _resolve_embed(sv.get("url") or "", referer=item.get("detail_url")),
-                    timeout=35,
+                    timeout=timeout,
                 )
             except asyncio.TimeoutError:
                 # One slow embed must never take the whole /watch down: mark it
                 # failed and let the other servers answer.
                 log.warning("resolve timeout for %s", sv.get("url"))
                 res = {"kind": "none", "url": sv.get("url"), "error": "timeout"}
+            kind = res.get("kind", "none")
+            if kind == "none":
+                _debug("حل", f"{host}: فشل ({res.get('error') or 'no media'})")
+            else:
+                _debug("حل", f"{host}: نجح ({kind}) → {res.get('url', '')[:60]}")
             return item, sv, res
 
-    return await asyncio.gather(*(one(item, sv) for item, sv in servers))
+    pending = {asyncio.create_task(one(item, sv)): (item, sv) for item, sv in servers}
+    loop = asyncio.get_running_loop()
+    deadline = loop.time() + timeout
+    while pending:
+        remaining = deadline - loop.time()
+        if remaining <= 0:
+            for t in pending:
+                t.cancel()
+            break
+        done, pending = await asyncio.wait(
+            pending, return_when=asyncio.FIRST_COMPLETED, timeout=remaining,
+        )
+        for t in done:
+            try:
+                done_results.append(t.result())
+            except Exception:
+                pass
+        hits = sum(1 for _, _, r in done_results if r.get("kind") != "none")
+        if hits >= enough:
+            for t in pending:
+                t.cancel()
+            break
+    return done_results
 
 
 # Per-title result cache with LRU eviction and thread safety.
@@ -275,9 +345,18 @@ async def _resolve_embed(url: str, referer: str | None) -> dict:
         http_sessions[sid] = {"url": got["url"], "referer": url, "created": time.monotonic()}
         return {"sid": sid, "kind": got["kind"], "url": got["url"], "error": None}
 
+    # Hosts that are hopeless even with a real browser (mixdrop reCAPTCHA,
+    # playmogo, koramaup, minochinos). Skip them instead of burning a
+    # browser open_session that would just time out. NOTE: this is NOT
+    # _http_hopeless — vibuxer/hgcloud/okru are HTTP-hopeless but the browser
+    # resolves them fine.
+    from .http_resolver import _browser_hopeless
+    if _browser_hopeless(url):
+        return {"kind": "none", "url": url, "error": "hopeless host skipped"}
+
     mgr = get_manager()
     if mgr is not None:
-        res = await mgr.open_session(url, referer)
+        res = await mgr.open_session(url, referer, timeout=10)
         if res.get("kind") != "none":
             verified = await mgr.fetch(res["sid"], res["url"])
             if verified and verified[0] < 400:
@@ -654,6 +733,7 @@ async def watch(req: WatchRequest, request: Request) -> dict:
     try:
         merged_items: list[dict] = []
         seen: set[tuple] = set()
+        t0 = time.monotonic()
         if sites:
             cand_results = await asyncio.gather(
                 *(asyncio.to_thread(_scrape_all, cand, sites) for cand in candidates)
@@ -664,6 +744,7 @@ async def watch(req: WatchRequest, request: Request) -> dict:
                     if key not in seen:
                         seen.add(key)
                         merged_items.append(item)
+        _debug("حفر", f"اكتمل الحفر: {len(merged_items)} عنصر في {time.monotonic()-t0:.1f}s")
 
         if req.type == "tv" and (req.season is not None or req.episode is not None):
             matching = [it for it in merged_items if _match_se(it, req.season, req.episode)]
@@ -684,25 +765,37 @@ async def watch(req: WatchRequest, request: Request) -> dict:
                     continue
                 seen_embed.add(key)
                 to_resolve.append((item, sv))
+        _debug("حل", f"{len(to_resolve)} رابط embed جاهز للحل")
 
         servers: list[dict] = []
-        for item, sv, res in await _resolve_many(to_resolve):
-            if res.get("kind") == "none":
-                continue
-            servers.append({
-                "site": item.get("source"),
-                "name": sv.get("name"),
-                "original_name": sv.get("original_name"),
-                "kind": res["kind"],
-                "proxy_url": base + _proxy_url(
-                    res["sid"], res["url"],
-                    ref=sv.get("url") or "",
-                    site_ref=item.get("detail_url") or "",
-                    ext=_ext_for(res["kind"]),
-                ),
-            })
+        t1 = time.monotonic()
 
-        imdb_id, subtitles_list = await _add_foreign_servers(req, base, servers)
+        async def build_arabic():
+            for item, sv, res in await _resolve_many(to_resolve):
+                if res.get("kind") == "none":
+                    continue
+                servers.append({
+                    "site": item.get("source"),
+                    "name": sv.get("name"),
+                    "original_name": sv.get("original_name"),
+                    "kind": res["kind"],
+                    "proxy_url": base + _proxy_url(
+                        res["sid"], res["url"],
+                        ref=sv.get("url") or "",
+                        site_ref=item.get("detail_url") or "",
+                        ext=_ext_for(res["kind"]),
+                    ),
+                })
+            return len(servers)
+
+        # Run Arabic resolve AND foreign providers (primetv/cnsource/imdb) in
+        # parallel — the total wait is max(...), not the sum.
+        build_task = asyncio.create_task(build_arabic())
+        foreign_task = asyncio.create_task(_add_foreign_servers(req, base, servers))
+        await build_task
+        imdb_id, subtitles_list = await foreign_task
+        _debug("حل", f"اكتمل الحل: {len(servers)} سيرفر في {time.monotonic()-t1:.1f}s")
+        _debug("حل", f"المصادر الخارجية (برايم/صيني/IMDb) + المجموع في {time.monotonic()-t0:.1f}s")
 
         arabic_n = 0
         for sv in servers:
@@ -800,6 +893,7 @@ async def _add_foreign_servers(req: WatchRequest, base: str, servers: list[dict]
     async def job_primetv() -> list[dict]:
         if not primetv.is_enabled():
             return []
+        _debug("برايم", f"بحث عن «{req.tmdb_id}» في برايم TV ...")
         key = api_key()
         info = {}
         if key:
@@ -817,6 +911,7 @@ async def _add_foreign_servers(req: WatchRequest, base: str, servers: list[dict]
             season=season,
             episode=episode,
         )
+        _debug("برايم", f"برايم TV: {len(res.servers)} رابط")
         label = primetv._cfg().get("label", "سيرفر برايم")
         provider_args = {
             "tmdb_id": req.tmdb_id,
@@ -853,6 +948,7 @@ async def _add_foreign_servers(req: WatchRequest, base: str, servers: list[dict]
         from . import cnsource
         if not cnsource.is_enabled():
             return []
+        _debug("صيني", f"بحث عن «{req.tmdb_id}» في المصادر الصينية ...")
         res = await asyncio.to_thread(
             cnsource.resolve,
             req.tmdb_id,
@@ -860,6 +956,7 @@ async def _add_foreign_servers(req: WatchRequest, base: str, servers: list[dict]
             season=season,
             episode=episode,
         )
+        _debug("صيني", f"المصادر الصينية: {len(res.servers)} رابط")
         label = cnsource._cfg().get("label", "سورس صيني")
         built = []
         for i, sv in enumerate(res.servers, 1):
@@ -1294,3 +1391,57 @@ async def health() -> dict:
         "cache_entries": len(_watch_cache),
         "providers": providers,
     }
+
+
+@app.get("/logs")
+async def logs(limit: int = 200):
+    """Recent live activity — the last N debug entries."""
+    entries = list(_debug_log)[-limit:]
+    return {"entries": entries, "count": len(entries)}
+
+
+@app.get("/debug", include_in_schema=False)
+async def debug_page(request: Request):
+    """Live activity page: polls /logs every second and renders it."""
+    html = """<!DOCTYPE html>
+<html lang="ar" dir="rtl">
+<head>
+<meta charset="utf-8"/>
+<title>نشاط الخادم الحي</title>
+<style>
+body{background:#111;color:#eee;font-family:'Segoe UI',Tahoma,sans-serif;margin:0;padding:16px}
+h1{font-size:18px;margin:0 0 8px;color:#4fc3f7}
+.summary{background:#1a1a1a;border:1px solid #333;border-radius:8px;padding:8px 12px;margin-bottom:12px;font-size:13px}
+#log{font-family:Consolas,monospace;font-size:12px;line-height:1.7}
+.row{padding:3px 8px;border-radius:4px;margin:2px 0;display:flex;gap:8px;align-items:baseline}
+.row .t{color:#888;min-width:70px}
+.row .step{background:#2a2a2a;border-radius:4px;padding:0 6px;color:#ffb74d;min-width:50px;text-align:center}
+.row .msg{color:#ddd;word-break:break-all}
+.ok{background:#1b3a24}.fail{background:#3a1b1b}.info{background:#1a1f3a}
+</style>
+</head>
+<body>
+<h1>🔴 نشاط الخادم الحي</h1>
+<div class="summary" id="summary">...</div>
+<div id="log"></div>
+<script>
+async function poll(){
+  try{
+    const r = await fetch('/logs?limit=200');
+    const d = await r.json();
+    const el = document.getElementById('log');
+    el.innerHTML = d.entries.map(e => {
+      let cls='info';
+      if(e.msg.includes('نجح')||e.msg.includes('اكتمل')) cls='ok';
+      if(e.msg.includes('فشل')||e.msg.includes('error')||e.msg.includes('timeout')) cls='fail';
+      return `<div class="row ${cls}"><span class="t">${e.t}</span><span class="step">${e.step}</span><span class="msg">${e.msg}</span></div>`;
+    }).join('');
+    document.getElementById('summary').textContent = `${d.count} حدث · تحديث كل ثانية`;
+  }catch(err){}
+}
+setInterval(poll, 1000);
+poll();
+</script>
+</body>
+</html>"""
+    return Response(html, media_type="text/html")

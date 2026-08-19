@@ -9,6 +9,9 @@ from __future__ import annotations
 import os
 
 if __name__ == "__main__":
+    from .envfile import load_env
+
+    load_env()
     import uvicorn
 
     host = os.environ.get("MIDDLEWARE_HOST", "0.0.0.0")

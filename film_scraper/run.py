@@ -32,6 +32,9 @@ except Exception:
 ROOT = Path(__file__).resolve().parent
 sys.path.insert(0, str(ROOT))
 
+from middleware.envfile import load_env
+load_env(ROOT / ".env")
+
 from scraper.sites import available_sites, build_scraper, find_config
 from scraper.fetcher import FetchSettings
 from scraper.storage import to_json, to_csv

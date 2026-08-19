@@ -34,6 +34,7 @@ def _parse_config(raw: dict[str, Any]) -> SiteConfig:
         detail_method=raw.get("detail_method", "get"),
         detail_data=raw.get("detail_data", {}),
         custom=raw.get("custom", {}),
+        enabled=bool(raw.get("enabled", True)),
     )
 
 
@@ -70,9 +71,14 @@ def load_sites(directory: str | Path = "configs") -> list[SiteConfig]:
         if path.name == "providers.json":
             continue
         try:
-            sites.append(load_config(path))
+            config = load_config(path)
         except Exception as exc:
             log.error("Skipping %s: %s", path, exc)
+            continue
+        if not config.enabled:
+            log.info("Skipping disabled site %s (%s)", config.name, path.name)
+            continue
+        sites.append(config)
     _sites_cache[dir_key] = (now, sites)
     return list(sites)
 

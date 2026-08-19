@@ -27,6 +27,7 @@ class SiteConfig:
     detail_method: str = "get"  # "get" or "post"
     detail_data: dict[str, Any] = field(default_factory=dict)
     custom: dict[str, Any] = field(default_factory=dict)
+    enabled: bool = True                 # False = skip in load_sites() (dead site)
 
 
 class BaseScraper:

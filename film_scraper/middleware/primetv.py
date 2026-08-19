@@ -473,14 +473,21 @@ def resolve(
         return cached[1]
 
     result = PrimetvResult()
-    engine = fetch_engine(
-        tmdb_id, media_type, title=title, year=year, imdb_id=imdb_id,
-        season=season, episode=episode, timeout=timeout,
-    )
+    engine, easy = None, None
+    with concurrent.futures.ThreadPoolExecutor(max_workers=2) as pool:
+        f_engine = pool.submit(
+            fetch_engine, tmdb_id, media_type, title=title, year=year,
+            imdb_id=imdb_id, season=season, episode=episode, timeout=timeout,
+        )
+        f_easy = pool.submit(
+            fetch_easyplex, tmdb_id, media_type, title=title,
+            season=season, episode=episode, timeout=timeout,
+        )
+        engine = f_engine.result(timeout=timeout + 5)
+        easy = f_easy.result(timeout=timeout + 5)
+
     for st in sorted(parse_engine_streams(engine), key=lambda s: -s["quality"]):
         result.servers.append(_to_server(st))
-
-    easy = fetch_easyplex(tmdb_id, media_type, title=title, season=season, episode=episode, timeout=timeout)
     embed_budget = int(cfg.get("embed_attempts", 3))
     for vid in parse_easyplex_videos(easy):
         if vid["resolved"] or is_direct_video_url(vid["url"]):
