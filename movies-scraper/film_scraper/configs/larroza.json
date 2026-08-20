@@ -1,0 +1,28 @@
+{
+  "name": "larroza",
+  "base_url": "https://larroza.pics/",
+  "search_url": "https://larroza.pics/search.php?keywords={query}",
+  "item_selector": "ul#pm-grid > li.col-xs-6.col-sm-4.col-md-3",
+  "fields": {
+    "title": "a@title",
+    "detail_url": "a@href"
+  },
+  "custom": {
+    "resolve_servers": true,
+    "verify_servers": true,
+    "label_servers": true,
+    "extra_detail_pages": [
+      {
+        "url": "play.php?vid={vid}",
+        "servers": ["watch_servers"]
+      }
+    ],
+    "watch_servers": {
+      "item_selector": "ul.WatchList > li[data-embed-url]",
+      "fields": {
+        "name": "strong",
+        "url": "@data-embed-url"
+      }
+    }
+  }
+}

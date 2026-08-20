@@ -1,0 +1,38 @@
+{
+  "name": "egydead",
+  "enabled": false,
+  "base_url": "https://tv10.egydead.live/",
+  "search_url": "https://tv10.egydead.live?s={query}",
+  "item_selector": "li.movieItem",
+  "fields": {
+    "title": "h1.BottomTitle",
+    "category": "span.cat_name",
+    "episode": "span.number_episode em",
+    "quality": "span.label",
+    "detail_url": "a@href"
+  },
+  "detail_method": "post",
+  "detail_data": {
+    "View": "1"
+  },
+  "custom": {
+    "resolve_servers": true,
+    "verify_servers": true,
+    "label_servers": true,
+    "watch_servers": {
+      "item_selector": "ul.serversList > li[data-link]",
+      "fields": {
+        "name": "p",
+        "url": "@data-link"
+      }
+    },
+    "download_servers": {
+      "item_selector": "ul.donwload-servers-list > li",
+      "fields": {
+        "name": "span.ser-name",
+        "quality": "div.server-info em",
+        "url": "a.ser-link@href"
+      }
+    }
+  }
+}

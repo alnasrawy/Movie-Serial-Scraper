@@ -1,0 +1,20 @@
+FROM python:3.12-slim
+
+WORKDIR /app
+
+ENV PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1 \
+    PIP_NO_CACHE_DIR=1 \
+    BROWSER_ENABLED=0
+
+# Lightweight image: pure-HTTP resolver only (no Playwright/Chromium).
+# Serves the EarnVids-family servers on low-memory hosts (free Render tier).
+
+COPY requirements-lite.txt .
+RUN pip install -r requirements-lite.txt
+
+COPY film_scraper/ .
+
+EXPOSE 8000
+
+CMD ["python", "-m", "middleware"]

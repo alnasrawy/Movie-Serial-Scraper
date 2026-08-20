@@ -1,0 +1,318 @@
+<!DOCTYPE html>
+<html lang="ar" dir="rtl">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>alnasrawy — فاحص السيرفرات</title>
+<style>
+:root { color-scheme: dark; }
+* { box-sizing: border-box; }
+body { font-family: "Segoe UI", Tahoma, Arial, sans-serif; background: #12151a; color: #e8e8e8; margin: 0; }
+header { background: #1b2028; padding: 18px 24px; border-bottom: 1px solid #2a3140; }
+header h1 { margin: 0; font-size: 20px; }
+header small { color: #9aa4b2; }
+main { max-width: 900px; margin: 24px auto; padding: 0 16px; }
+.card { background: #1b2028; border: 1px solid #2a3140; border-radius: 10px; padding: 20px; margin-bottom: 18px; }
+label { display: block; margin: 10px 0 4px; font-size: 14px; color: #b9c2cf; }
+input[type=text], select { width: 100%; padding: 10px 12px; border: 1px solid #3a4354; border-radius: 8px; background: #0f1216; color: #e8e8e8; font-size: 15px; }
+input[type=text]:focus, select:focus { outline: none; border-color: #4c8dff; }
+.row { display: flex; gap: 12px; flex-wrap: wrap; }
+.row > div { flex: 1; min-width: 140px; }
+.checkbox-row { display: flex; gap: 18px; margin-top: 12px; flex-wrap: wrap; }
+.checkbox-row label { margin: 0; display: flex; align-items: center; gap: 6px; color: #d5dbe3; }
+button { cursor: pointer; }
+button[type=submit] { margin-top: 16px; width: 100%; padding: 12px; background: #2f6feb; color: #fff; border: none; border-radius: 8px; font-size: 16px; font-weight: 600; }
+button[type=submit]:disabled { opacity: .5; cursor: wait; }
+.server { display: flex; align-items: center; gap: 12px; padding: 12px 14px; border: 1px solid #2a3140; border-radius: 8px; margin-bottom: 10px; background: #161a21; flex-wrap: wrap; }
+.server .badge { background: #2f6feb22; color: #7fb0ff; border: 1px solid #2f6feb55; border-radius: 6px; padding: 2px 10px; font-size: 12px; }
+.server .meta { flex: 1; min-width: 180px; }
+.server .name { font-weight: 600; }
+.server .url { color: #9aa4b2; font-size: 12px; direction: ltr; text-align: right; word-break: break-all; }
+.server .btn { border: none; border-radius: 6px; padding: 8px 14px; font-size: 13px; font-weight: 600; }
+.btn-play { background: #1f9d55; color: #fff; }
+.btn-copy { background: #3a4354; color: #e8e8e8; }
+video { width: 100%; background: #000; border-radius: 8px; max-height: 420px; }
+#status { margin-top: 12px; font-size: 14px; color: #9aa4b2; }
+#error { color: #ff7b7b; }
+.footer { color: #6b7683; font-size: 12px; text-align: center; margin: 30px 0 20px; }
+</style>
+</head>
+<body>
+<header>
+  <h1>alnasrawy — فاحص السيرفرات</h1>
+  <small>محركنا الخاص: مواقعنا العربية + مصادر إضافية — شغّل مباشرة أو انسخ رابط VLC/ExoPlayer</small>
+</header>
+
+<main>
+  <div class="card">
+    <form id="frm">
+      <label for="input">اسم الفيلم / المسلسل أو معرّف TMDB</label>
+      <input type="text" id="input" placeholder="مثال: Inception أو 27205" required>
+      <div class="row">
+        <div>
+          <label for="type">النوع</label>
+          <select id="type">
+            <option value="movie">فيلم</option>
+            <option value="tv">مسلسل</option>
+          </select>
+        </div>
+      </div>
+      <div class="note" style="color:#9aa4b2; font-size:13px; margin-top:12px">المصدر: مواقعنا العربية (أكوام، إيجي ديد) للأفلام + سيرفرات أجنبية عبر الخادم — نعرض فقط السيرفرات الحيّة القابلة للتشغيل</div>
+      <button type="submit" id="go">ابحث</button>
+    </form>
+    <div id="status"></div>
+  </div>
+
+  <div class="card">
+    <video id="player" controls playsinline></video>
+  </div>
+
+  <div id="results"></div>
+  <div class="footer">alnasrawy — Backend: FastAPI + HTTP resolver</div>
+</main>
+
+<script src="https://cdn.jsdelivr.net/npm/hls.js@1/dist/hls.min.js"></script>
+<script>
+const $ = (id) => document.getElementById(id);
+let hls = null;
+
+function setStatus(msg, isError) {
+  const el = $("status");
+  el.id = isError ? "error" : "status";
+  el.textContent = msg;
+}
+
+$("frm").addEventListener("submit", async (ev) => {
+  ev.preventDefault();
+  const raw = $("input").value.trim();
+  if (!raw) return;
+  const body = { type: $("type").value };
+  if (/^\d+$/.test(raw)) {
+    body.tmdb_id = parseInt(raw, 10);
+  } else {
+    // Resolve the title to a TMDB id so the IMDb/subtitle lookup runs too.
+    try {
+      const want = $("type").value;
+      const sr = await fetch("/tmdb/search?q=" + encodeURIComponent(raw) + "&page=1");
+      const sj = await sr.json();
+      const items = sj.items || [];
+      const hit = items.find(it => it.media_type === want) || items[0];
+      if (hit && hit.tmdb_id) body.tmdb_id = hit.tmdb_id;
+      else body.query = raw;
+    } catch (e) {
+      body.query = raw;
+    }
+  }
+
+  const go = $("go");
+  go.disabled = true;
+  $("results").innerHTML = "";
+  setStatus("جارٍ الكشط وحلّ السيرفرات… ثوانٍ قليلة");
+  try {
+    const r = await fetch("/watch", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+    });
+    const data = await r.json();
+    if (!r.ok) throw new Error(data.detail || "فشل الطلب");
+    render(data);
+    const dr = await fetch("/direct", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+    });
+    if (dr.ok) renderDirect(await dr.json());
+  } catch (e) {
+    setStatus("خطأ: " + e.message, true);
+  } finally {
+    go.disabled = false;
+  }
+});
+
+function absUrl(proxy) {
+  return /^https?:\/\//i.test(proxy) ? proxy : new URL(proxy, location.href).href;
+}
+
+function render(data) {
+  setStatus("الاستعلام: " + data.query + " — وجدنا " + data.servers.length + " سيرفر");
+  const wrap = $("results");
+  wrap.innerHTML = "";
+  const arabic = data.servers.filter(s => !s.foreign);
+  const foreign = data.servers.filter(s => s.foreign);
+  for (const s of arabic) {
+    const el = document.createElement("div");
+    el.className = "server";
+    const url = absUrl(s.proxy_url);
+    el.innerHTML = `
+      <span class="badge">${s.site} · ${s.kind}</span>
+      <div class="meta">
+        <div class="name">${s.name}</div>
+        <div class="url">${url}</div>
+      </div>
+      <button class="btn btn-play">تشغيل</button>
+      <button class="btn btn-copy">نسخ الرابط</button>`;
+    el.querySelector(".btn-play").onclick = () => play(url);
+    el.querySelector(".btn-copy").onclick = () => navigator.clipboard.writeText(url).then(() => setStatus("تم نسخ الرابط"));
+    wrap.appendChild(el);
+  }
+  if (foreign.length) {
+    const card = document.createElement("div");
+    card.className = "card";
+    card.innerHTML = `<h3 style="margin:0 0 10px">سيرفرات أجنبية (عبر الخادم)</h3>`;
+    for (const s of foreign) {
+      const el = document.createElement("div");
+      el.className = "server";
+      const url = absUrl(s.proxy_url);
+      el.innerHTML = `
+        <span class="badge">${s.site} · ${s.kind}</span>
+        <div class="meta">
+          <div class="name">${s.name}</div>
+          <div class="url">${url}</div>
+        </div>
+        <button class="btn btn-play">تشغيل</button>
+        <button class="btn btn-copy">نسخ</button>`;
+      el.querySelector(".btn-play").onclick = () => play(url);
+      el.querySelector(".btn-copy").onclick = () => navigator.clipboard.writeText(url).then(() => setStatus("تم نسخ الرابط"));
+      card.appendChild(el);
+    }
+    wrap.appendChild(card);
+  }
+  if (!data.servers.length) setStatus("لم يُعثر على سيرفرات قابلة للتشغيل لهذا العنوان.");
+  renderSubs(data.subtitles || [], data.imdb_id || "");
+}
+
+let subsBar = null;
+let subsTrack = null;
+
+// Always offer the common languages (Arabic first) even when a title's top
+// OpenSubtitles matches don't list them; /subtitle does a targeted search.
+const COMMON_SUB_LANGS = [
+  ["ara", "العربية"],
+  ["eng", "English"],
+  ["per", "فارسی"],
+  ["tur", "Türkçe"],
+  ["fre", "Français"],
+  ["spa", "Español"],
+  ["ger", "Deutsch"],
+  ["rus", "Русский"],
+  ["hin", "हिन्दी"],
+];
+
+function renderSubs(subs, imdbId) {
+  const old = document.getElementById("subs-card");
+  if (old) old.remove();
+  subsBar = null;
+  subsTrack = null;
+  if (!imdbId) return;
+  const byCode = new Map();
+  for (const [code, name] of COMMON_SUB_LANGS) byCode.set(code, { code, name, count: 0 });
+  for (const s of subs) {
+    const hit = byCode.get(s.code);
+    if (hit) { hit.count = s.count || hit.count; }
+    else byCode.set(s.code, { code: s.code, name: s.name || s.code, count: s.count || 0 });
+  }
+  const merged = [...byCode.values()];
+  subsBar = { subs: merged, imdbId };
+  const card = document.createElement("div");
+  card.className = "card";
+  card.id = "subs-card";
+  card.innerHTML = `
+    <h3 style="margin:0 0 10px">الترجمة</h3>
+    <label for="subs-sel">اختر لغة الترجمة (تُحمَّل أثناء التشغيل)</label>
+    <select id="subs-sel">
+      <option value="">بدون ترجمة</option>
+      ${merged.map(s => `<option value="${s.code}">${s.name}${s.count ? " (" + s.count + ")" : ""}</option>`).join("")}
+    </select>`;
+  card.querySelector("#subs-sel").addEventListener("change", (ev) => setSubtitle(ev.target.value));
+  document.getElementById("results").appendChild(card);
+}
+
+function setSubtitle(code) {
+  if (!subsBar) return;
+  const i = code ? subsBar.subs.findIndex(s => s.code === code) : -1;
+  subsTrack = i;
+  if (hls) {
+    hls.subtitleTrack = i;
+    hls.subtitleDisplay = i >= 0;
+  }
+}
+
+function play(url) {
+  const video = $("player");
+  subsTrack = null;
+  if (hls) { hls.destroy(); hls = null; }
+  const decoded = decodeURIComponent(url);
+  const isDash = /\.mpd([?]|$)/i.test(decoded);
+  const isMp4 = /\.mp4([?]|$)/i.test(decoded);
+  if (isDash) {
+    setStatus("DASH (مسلسلات برايم) يعمل عبر تطبيق أندرويد (ExoPlayer) — نسخ الرابط للتجربة في مشغل يدعم DASH.", true);
+    return;
+  }
+  if (!isMp4 && window.Hls && Hls.isSupported()) {
+    hls = new Hls({ enableWebVTT: true, subtitleDisplay: true, maxRetry: 4, fragLoadingMaxRetry: 4 });
+    attachSubs(video, subsBar);
+    hls.on(Hls.Events.ERROR, (_e, err) => {
+      if (!err.fatal) return;
+      const kind = err.type === Hls.ErrorTypes.MEDIA_ERROR ? "خطأ وسائط" : "خطأ شبكة";
+      if (hls.autoRecoverError) {
+        setStatus(kind + ": " + (err.details || "") + " — محاولة استعادة…");
+        hls.autoRecoverError = false;
+        hls.recoverMediaError();
+        setTimeout(() => hls.startLoad(), 1000);
+        return;
+      }
+      setStatus(kind + ": " + (err.details || "") + " — اضغط تشغيل مرة أخرى للمحاولة", true);
+    });
+    hls.loadSource(url);
+    hls.attachMedia(video);
+    if (subsBar) {
+      hls.on(Hls.Events.SUBTITLE_TRACKS_UPDATED, () => {
+        if (subsTrack !== null) hls.subtitleTrack = subsTrack;
+      });
+    }
+  } else {
+    video.src = url;
+    attachSubs(video, subsBar);
+  }
+  video.play().catch(() => {});
+}
+
+function attachSubs(video, bar) {
+  if (!bar) return;
+  for (const s of bar.subs) {
+    const t = document.createElement("track");
+    t.kind = "subtitles";
+    t.label = s.name;
+    t.srclang = s.code;
+    t.src = `/subtitle?imdb_id=${encodeURIComponent(bar.imdbId)}&lang=${encodeURIComponent(s.code)}&fmt=vtt`;
+    video.appendChild(t);
+  }
+}
+
+function renderDirect(data) {
+  const wrap = document.createElement("div");
+  wrap.className = "card";
+  wrap.innerHTML = `<h3 style="margin:0 0 10px">روابط مباشرة خام (m3u8)</h3>
+    <div style="color:#ffb86b; font-size:13px; margin-bottom:8px">⚠ غالبًا تتطلب Referer ولا تعمل عند لصقها مباشرة في VLC — استخدم روابط السيرفرات (عبر الخادم) بالأعلى للتشغيل.</div>`;
+  if (!data.servers.length) {
+    wrap.innerHTML += `<div style="color:#9aa4b2">لم يُستخرج رابط مباشر لهذا العنوان.</div>`;
+  }
+  for (const s of data.servers) {
+    const el = document.createElement("div");
+    el.className = "server";
+    el.innerHTML = `
+      <span class="badge">${s.site} · ${s.kind}</span>
+      <div class="meta">
+        <div class="name">${s.name}</div>
+        <div class="url" dir="ltr">${s.url}</div>
+      </div>
+      <button class="btn btn-copy">نسخ</button>`;
+    el.querySelector(".btn-copy").onclick = () => navigator.clipboard.writeText(s.url).then(() => setStatus("تم نسخ الرابط المباشر"));
+    wrap.appendChild(el);
+  }
+  document.getElementById("results").appendChild(wrap);
+}
+</script>
+</body>
+</html>

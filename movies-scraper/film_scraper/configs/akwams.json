@@ -1,0 +1,43 @@
+{
+  "name": "akwams",
+  "base_url": "https://akwams.org/",
+  "search_url": "https://akwams.org/?s={query}",
+  "item_selector": "a.movie__block",
+  "fields": {
+    "title": "h3",
+    "category": ".post__category",
+    "quality": ".__quality",
+    "description": ".post__info p",
+    "image": "img.wp-post-image@src",
+    "detail_url": "@href"
+  },
+  "custom": {
+    "resolve_servers": true,
+    "verify_servers": true,
+    "label_servers": true,
+    "extra_detail_pages": [
+      {
+        "suffix": "watch",
+        "servers": ["watch_servers"]
+      },
+      {
+        "suffix": "download",
+        "servers": ["download_servers"]
+      }
+    ],
+    "watch_servers": {
+      "item_selector": "button.server-btn",
+      "fields": {
+        "name": ".",
+        "url": "@data-link"
+      }
+    },
+    "download_servers": {
+      "item_selector": "div.download-card",
+      "fields": {
+        "name": "h4",
+        "url": "a.download-btn@href"
+      }
+    }
+  }
+}

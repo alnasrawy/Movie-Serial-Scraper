@@ -1,0 +1,26 @@
+# Render.com blueprint — connect this repo on Render and it deploys automatically.
+# One-click deploy: dashboard.render.com -> New + -> Blueprint -> select this repo.
+#
+# NOTE: this file lives in movies-scraper/. If your GitHub repo root is the
+# "Default Project" folder (with other projects inside), either:
+#   a) push movies-scraper/ as its OWN GitHub repo (recommended), or
+#   b) add `rootDir: movies-scraper` below (Render then builds from that dir).
+#
+# The free plan runs the *lite* image (pure-HTTP resolver, no browser). To get
+# browser-resolved hosts (vibuxer/hgcloud) use the full image instead:
+#   dockerfilePath: ./Dockerfile
+#   envVars: BROWSER_ENABLED=1   (needs >= 1GB RAM -> a paid plan or a VPS)
+services:
+  - type: web
+    name: movie-serial-scraper
+    runtime: docker
+    plan: free
+    dockerfilePath: ./Dockerfile.lite
+    healthCheckPath: /health
+    envVars:
+      - key: TMDB_API_KEY
+        sync: false   # you set this in the Render dashboard (never in the repo)
+      - key: MIDDLEWARE_HOST
+        value: 0.0.0.0
+      - key: BROWSER_ENABLED
+        value: "0"

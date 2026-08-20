@@ -1,0 +1,28 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+.venv/
+venv/
+
+# Generated output
+output/
+*.log
+ai_context.md
+
+# Reverse-engineering artifacts (not part of the project)
+apk/
+
+# Secrets
+.env
+
+# Android
+android/.gradle/
+android/build/
+android/app/build/
+android/local.properties
+android/.idea/
+android/captures/
+*.keystore
+*.jks
